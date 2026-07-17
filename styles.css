@@ -1157,7 +1157,16 @@ html[data-theme="light"] {
   max-width: 88%;
 }
 .agent-msg.agent { align-self: flex-start; max-width: 94%; }
-.agent-msg.thinking { color: var(--ink-dim); }
+.agent-msg.thinking {
+  color: var(--ink-dim);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  animation: thinkpulse 1.4s ease-in-out infinite;
+}
+@keyframes thinkpulse {
+  0%, 100% { opacity: 0.65; }
+  50%      { opacity: 1; }
+}
 .agent-msg.act {
   align-self: flex-start;
   font-family: var(--mono);
@@ -1207,3 +1216,60 @@ html[data-theme="light"] {
   line-height: 1.5;
 }
 .agent-hint code { font-family: var(--mono); color: var(--second); }
+
+/* ------------------------------------------------------- CLI & skills */
+
+.agent-msg.cli {
+  align-self: flex-start;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--second);
+  border-color: var(--line);
+  background: var(--bg-sunken);
+  padding: 6px 10px;
+  max-width: 96%;
+}
+
+#cli-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.cli-prompt {
+  font-family: var(--mono);
+  color: var(--third);
+  font-size: 14px;
+}
+
+#cli-input {
+  flex: 1;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  padding: 7px 10px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  min-width: 0;
+}
+#cli-input:focus { outline: none; border-color: var(--third); }
+
+.skill-row {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: var(--bg-card);
+}
+
+.skill-head { display: flex; align-items: center; gap: 8px; }
+.skill-name { font-weight: 650; font-size: 13px; flex: 1; }
+.skill-desc { margin: 6px 0; font-size: 11.5px; color: var(--ink-dim); line-height: 1.45; }
+
+.skill-form { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.skill-form .move-btn { align-self: flex-end; }
+.skill-create { border-top: 1px dashed var(--line); padding-top: 8px; margin-top: 14px; }
+.skill-create .d-section { margin: 0 0 4px; }

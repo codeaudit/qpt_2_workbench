@@ -67,6 +67,7 @@
   </div>
   <div class="d-tabs">
     <button class="d-tab" data-tab="semantics">Semantics</button>
+    <button class="d-tab" data-tab="skills">Skills</button>
     <button class="d-tab active" data-tab="gate">Gate &amp; Formulas</button>
     <button class="d-tab" data-tab="axioms">Axioms &amp; Laws</button>
     <button class="d-tab" data-tab="signs">Signs &amp; Categories</button>
@@ -130,6 +131,10 @@
     <input id="agent-input" type="text" placeholder="Request a board action…" autocomplete="off">
     <button class="btn" type="submit">Send</button>
   </form>
+  <form id="cli-form">
+    <span class="cli-prompt">›</span>
+    <input id="cli-input" type="text" placeholder="CLI: cards · move p1 gate · edit p2 pathology=content · skills …" autocomplete="off" spellcheck="false">
+  </form>
   <div class="agent-hint">Bridge: @moonshot-ai/kimi-agent-sdk → local kimi CLI. Requires <code>npm start</code> in qpt-ui/.</div>
 </aside>
 
@@ -137,6 +142,7 @@
 <div id="toast"></div>
 
 <script src="qpt-data.js"></script>
+<script src="qpt-core.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

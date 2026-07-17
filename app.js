@@ -12,6 +12,7 @@
 
 (function () {
   const R = QPT_DATA.reference;
+  const CORE = QPT_CORE.createCore(QPT_DATA); // shared domain logic (qpt-core.js)
   const STORE_KEY = "qpt-workbench-v2";
   const SIGMA_A = 10; // sigmoid sharpness `a` (§8.1)
 
@@ -51,10 +52,77 @@
     try { return JSON.parse(localStorage.getItem(STORE_KEY)); } catch (e) { return null; }
   }
 
-  function saveStore() {
+  function saveStoreLocal() {
     try {
       localStorage.setItem(STORE_KEY, JSON.stringify({ boardId: state.boardId, cards: state.cards }));
     } catch (e) { /* storage unavailable — board still works in-memory */ }
+  }
+
+  /* ---------------------------------- server-store sync (when reachable) */
+
+  const remote = { connected: false, version: -1, pushTimer: null, pushing: false };
+
+  function saveStore() {
+    saveStoreLocal();
+    if (remote.connected && !remote.pushing) {
+      clearTimeout(remote.pushTimer);
+      remote.pushTimer = setTimeout(pushRemote, 400);
+    }
+  }
+
+  function adoptRemote(s) {
+    remote.version = s.version;
+    state.boardId = s.boardId || state.boardId;
+    state.cards = s.cards || state.cards;
+    state.customSeq = s.customSeq || 0;
+    saveStoreLocal();
+    renderAll();
+  }
+
+  async function pushRemote() {
+    remote.pushTimer = null;
+    remote.pushing = true;
+    try {
+      const res = await fetch(AGENT_URL + "/api/state", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          boardId: state.boardId, cards: state.cards,
+          customSeq: state.customSeq, clientVersion: remote.version,
+        }),
+      });
+      if (res.status === 409) {
+        adoptRemote(await res.json()); // store moved under us — adopt canonical
+      } else {
+        const r = await res.json();
+        if (r.version != null) remote.version = r.version;
+      }
+    } catch { /* offline — localStorage still has it */ }
+    remote.pushing = false;
+  }
+
+  async function remotePoll() {
+    if (remote.pushing || remote.pushTimer) return; // local edit in flight
+    try {
+      const s = await (await fetch(AGENT_URL + "/api/state")).json();
+      if (s.version !== remote.version) adoptRemote(s);
+    } catch { /* keep local state */ }
+  }
+
+  async function remoteInit() {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 2000);
+      const h = await fetch(AGENT_URL + "/api/health", { signal: ctrl.signal });
+      clearTimeout(t);
+      if (!h.ok) throw new Error("bad health");
+      const s = await (await fetch(AGENT_URL + "/api/state")).json();
+      remote.connected = true;
+      adoptRemote(s);
+      setInterval(remotePoll, 3000);
+    } catch {
+      remote.connected = false; // file:// / offline mode: localStorage only
+    }
   }
 
   function resetStore() {
@@ -70,6 +138,16 @@
     closeModal();
     renderAll();
     notice("Board reset to the seeded specification state.");
+    if (remote.connected) {
+      fetch(AGENT_URL + "/api/cli", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ command: "reset" }),
+      }).then(() => fetch(AGENT_URL + "/api/state"))
+        .then((r) => r.json())
+        .then(adoptRemote)
+        .catch(() => {});
+    }
   }
 
   function currentBoard() { return QPT_DATA.boards.find((b) => b.id === state.boardId); }
@@ -81,58 +159,14 @@
 
   /* ------------------------------------------------------ gate logic (§7–8) */
 
-  function scoreOf(c) {
-    if (c.rho == null) return null;
-    return c.rho - c.delta - c.gamma * Math.log(c.k);
-  }
-
-  function zoneOf(c) {
-    const S = scoreOf(c);
-    if (S == null) return null;
-    const d = S - c.theta;
-    if (Math.abs(d) <= 0.15) return 2;      // phase transition
-    return d < 0 ? 1 : 3;                    // drift / anchored control
-  }
-
-  function sigmoidP(c) {
-    const S = scoreOf(c);
-    if (S == null) return null;
-    return 1 / (1 + Math.exp(-SIGMA_A * (S - c.theta)));
-  }
-
-  function evaluate(c) {
-    if (c.source == null) return null;
-    const S = scoreOf(c);
-    const Rc = c.source === "recruited";                 // (○)-recruited
-    const Gc = c.target === "grounded";                  // [□]-grounded
-    const quant = S >= c.theta;                          // S ≥ θ
-    let key, label, sub;
-    if (Rc && Gc && quant)        { key = "living";    label = "Living";             sub = "generative act — dual passage"; }
-    else if (Rc && Gc)            { key = "threshold"; label = "At threshold";       sub = "Zone 2 — unstable; stay with the encounter"; }
-    else if (Rc && !Gc)           { key = "delusion";  label = "Beautiful delusion"; sub = "R without G — inspired, ungrounded"; }
-    else if (!Rc && Gc)           { key = "competent"; label = "Competent-dead";     sub = "G without R — grounded, no vitality"; }
-    else                          { key = "dead";      label = "Fully dead";         sub = "administrative process — {△} → {△}"; }
-    return { R: Rc, G: Gc, quant, S, key, label, sub, living: key === "living" };
-  }
-
-  // naming trajectory (§12) — derived from the same (source, target) vector
-  function namingClass(c) {
-    const r = c.source === "recruited", g = c.target === "grounded";
-    if (r && g)  return { key: "living",    label: "Living name" };
-    if (r && !g) return { key: "delusion",  label: "Poetic capture" };
-    if (!r && g) return { key: "competent", label: "Technical term" };
-    return { key: "dead", label: "Jargon" };
-  }
+  function scoreOf(c) { return CORE.scoreOf(c); }
+  function zoneOf(c) { return CORE.zoneOf(c); }
+  function sigmoidP(c) { return CORE.sigmoidP(c); }
+  function evaluate(c) { return CORE.evaluate(c); }
+  function namingClass(c) { return CORE.namingClass(c); }
 
   // normalized reliability weights across a board (§19): wᵤ = (Γᵤ+ε₀)/Σᵥ(Γᵥ+ε₀)
-  function weights() {
-    const EPS0 = 0.05;
-    const withRel = boardCards().filter((c) => c.reliability != null);
-    const sum = withRel.reduce((acc, c) => acc + c.reliability + EPS0, 0);
-    const map = {};
-    withRel.forEach((c) => { map[c.id] = (c.reliability + EPS0) / sum; });
-    return map;
-  }
+  function weights() { return CORE.weights(state); }
 
   /* ------------------------------------------------------------- notices */
 
@@ -154,82 +188,15 @@
 
   /* ------------------------------------------------- movement semantics */
 
-  function canMove(c, toId) {
-    const from = colIndex(c.column);
-    const to = colIndex(toId);
-    if (to < 0 || to === from) return { ok: true };
+  function canMove(c, toId) { return CORE.canMove(state, c, toId); }
 
-    // A13 — commitment horizon = 1: no forward skips
-    if (to > from + 1) {
-      return { ok: false, msg: "A13 · Commitment horizon = 1 — the option space past the next gate passage does not yet exist. Advance one column at a time." };
-    }
-
-    if (state.boardId === "protocol") {
-      const ev = evaluate(c);
-      // A9 — dual gate: only living trajectories proceed to articulation
-      if (c.column === "gate" && toId === "articulation" && ev && !ev.living) {
-        return { ok: false, msg: "A9 · The gate refused: R ⊓ G does not hold here (" + ev.label + "). {△}-articulation before dual passage is dead naming.", focus: "gate" };
-      }
-      // §14 step 3 — failure must be diagnosed before returning to step 1
-      if (c.column === "gate" && to < from && ev && !ev.living && !c.pathology) {
-        return { ok: false, msg: "§14 · Gate failed (" + ev.label + "). Diagnose via the five-layer model before returning to step 1.", focus: "pathology" };
-      }
-    }
-
-    // A7 — genesis emergence: synthesis requires a property present in no parent
-    if (state.boardId === "dialectic" && toId === "synthesize" && c.kind !== "note") {
-      if (!(c.genesis && c.genesis.trim())) {
-        return { ok: false, msg: "A7 · Genesis requires an emergent property present in neither parent — declare it before synthesis.", focus: "genesis" };
-      }
-    }
-    return { ok: true };
-  }
-
-  function colName(boardId, colId) {
-    const b = QPT_DATA.boards.find((x) => x.id === boardId);
-    const col = b && b.columns.find((x) => x.id === colId);
-    return col ? col.name : colId;
-  }
+  function colName(boardId, colId) { return CORE.colName(boardId, colId); }
 
   // §9.2 — the trace: a card's own post-hoc articulation of its navigation
-  function pushTrace(c, entry) {
-    if (!c.trace) c.trace = [];
-    entry.n = c.trace.length + 1;
-    c.trace.push(entry);
-    if (c.trace.length > 50) c.trace = c.trace.slice(-50);
-  }
+  function pushTrace(c, entry) { CORE.pushTrace(c, entry); }
 
   // actions fired by a successful intra-board move
-  function onTransition(c, from, to) {
-    let note = "";
-    const cols = currentBoard().columns;
-    const fi = cols.findIndex((x) => x.id === from);
-    const ti = cols.findIndex((x) => x.id === to);
-
-    // gate evaluations are recorded with their quantitative state (§7–8)
-    const ev = evaluate(c);
-    if (to === "gate" && ev) {
-      note = "evaluated at the gate: " + ev.label + " — S " + ev.S.toFixed(2) +
-             (ev.quant ? " ≥ θ " : " < θ ") + c.theta.toFixed(2);
-    }
-    if (from === "gate" && to === "articulation" && ev) {
-      note = "dual passage (A9): S " + ev.S.toFixed(2) + " ≥ θ " + c.theta.toFixed(2) +
-             " — proceeds to naming downstream of passage";
-    }
-
-    // §19 — advancing a dialectic phase: χ follows the schedule; Γ updates by EMA
-    if (c.board === "dialectic" && ti === fi + 1) {
-      const parts = ["χ " + cols[fi].step + " → " + cols[ti].step + " (schedule →|π)"];
-      if (c.reliability != null) {
-        const old = c.reliability;
-        c.reliability = Math.round((0.7 * old + 0.3) * 100) / 100; // λ = 0.7, score = 1 (survived the phase)
-        parts.push("Γ " + old.toFixed(2) + " → " + c.reliability.toFixed(2) + " (EMA λ = 0.7, §19)");
-      }
-      note = parts.join("; ");
-    }
-
-    pushTrace(c, { action: "passage", from: colName(c.board, from), to: colName(c.board, to), note });
-  }
+  function onTransition(c, from, to) { CORE.onTransition(state, c, from, to); }
 
   function moveCard(id, colId) {
     const c = state.cards[id];
@@ -245,7 +212,7 @@
     }
     const from = c.column;
     c.column = colId;
-    onTransition(c, from, colId);
+    onTransition(c, from, colId); // core: trace + §19 EMA
     saveStore();
     renderAll();
     if (colId === "gate") {
@@ -276,110 +243,20 @@
 
   /* ------------------------------------------- promotion between boards */
 
-  function cardsOn(boardId) {
-    return Object.values(state.cards).filter((c) => c.board === boardId);
-  }
+  function cardsOn(boardId) { return CORE.cardsOn(state, boardId); }
+  function nextAgent(boardId) { return CORE.nextAgent(state, boardId); }
+  function promotionTargets(c) { return CORE.promotionTargets(c); }
 
-  function nextAgent(boardId) {
-    const SUB = "₀₁₂₃₄₅₆₇₈₉";
-    const agentNum = (a) => {
-      if (!a) return null;
-      let m = /^u(\d+)$/.exec(a);
-      if (m) return parseInt(m[1], 10);
-      m = /^u([₀-₉]+)$/.exec(a);
-      if (m) return parseInt(m[1].split("").map((ch) => SUB.indexOf(ch)).join(""), 10);
-      return null;
-    };
-    const used = cardsOn(boardId).map((c) => agentNum(c.agent)).filter((n) => n != null);
-    const n = (used.length ? Math.max.apply(null, used) : 0) + 1;
-    return "u" + String(n).split("").map((d) => SUB[parseInt(d, 10)]).join("");
-  }
-
-  function stripGateFields(c) {
-    delete c.source; delete c.target;
-    delete c.rho; delete c.delta; delete c.gamma; delete c.k; delete c.theta;
-    delete c.scale;
-    c.pathology = null; c.death = null;
-  }
-  function stripDialecticFields(c) {
-    delete c.kind; delete c.agent; delete c.reliability; delete c.genesis;
-  }
-  function addAxioms(c, ids) {
-    c.axioms = (c.axioms || []).concat(ids).filter((v, i, a) => a.indexOf(v) === i);
-  }
-
-  // the meta-workflow: how work moves between the three boards
-  function promotionTargets(c) {
-    const T = [];
-    if (c.board === "protocol" && c.column === "closure") {
-      T.push({ board: "dialectic", column: "explore",
-        label: "⇧ Promote to the Scheduled Dialectic",
-        why: "§15 · System-2 = coordinated(System-1): a resolved structure whose question is now contested enters coordination as a position in Explore." });
-    }
-    if (c.board === "dialectic" && c.column === "synthesize") {
-      T.push({ board: "protocol", column: "initiation",
-        label: "⇧ Ground the constructor in the Generative Protocol",
-        why: "§7.4 · The gate applies to everything: an emergent constructor is not automatically living — it must pass 𝒢 like any transformation." });
-    }
-    if (c.board === "protocol" && c.death) {
-      T.push({ board: "resolution", column: "phase0",
-        label: "⇧ Escalate to the Resolution Procedure",
-        why: "§11 / §29 · Dead structure is failure-field material: it is not forced through the gate but mapped, excavated, and redesigned." });
-    }
-    if (c.board === "resolution" && c.column === "phase5") {
-      T.push({ board: "protocol", column: "initiation",
-        label: "⇧ Return to living process",
-        why: "§29 · Evolutionary iteration closes the loop: the redesigned structure re-enters the Generative Protocol at Initiation." });
-    }
-    return T;
-  }
-
+  // DOM-facing promotion: core mutates the card; we handle panel/toast/render
   function promote(c, t) {
-    const from = { board: c.board, column: c.column };
-    if (t.board === "dialectic") {
-      stripGateFields(c);
-      delete c.tags;
-      c.kind = "position";
-      c.agent = nextAgent("dialectic");
-      c.reliability = 0.70;
-      c.genesis = null;
-      c.sign = "⟨⦿△ ≡ ⊣α⟩"; c.signName = "Legisign–Symbol–Abduction";
-      addAxioms(c, ["A19", "A20"]);
-    } else if (t.board === "protocol") {
-      stripDialecticFields(c);
-      delete c.tags;
-      c.source = "recruited"; c.target = "grounded";
-      c.rho = 0.80; c.delta = 0.10; c.gamma = 0.25; c.k = 3; c.theta = 0.40;
-      c.scale = "meso"; c.pathology = null; c.death = null;
-      c.sign = "⟨⦿□ ⇢ ⊣□⟩"; c.signName = "Sinsign–Index–Dicisign";
-      addAxioms(c, ["A9"]);
-    } else { // resolution
-      const wasDeath = c.death, wasPath = c.pathology;
-      stripGateFields(c);
-      stripDialecticFields(c);
-      const tags = [];
-      if (wasDeath) tags.push("† " + wasDeath);
-      if (wasPath) tags.push(wasPath + " layer");
-      c.tags = tags.length ? tags : ["from the protocol"];
-      c.pathology = null; c.death = null;
-      c.sign = "⟨⦿□ ⇢ ⊣□⟩"; c.signName = "Sinsign–Index–Dicisign";
-      addAxioms(c, ["ML"]);
-    }
-    c.origin = from;
-    pushTrace(c, {
-      action: "⇧ promote",
-      from: (QPT_DATA.boards.find((b) => b.id === from.board) || {}).title + " · " + colName(from.board, from.column),
-      to: (QPT_DATA.boards.find((b) => b.id === t.board) || {}).title + " · " + colName(t.board, t.column),
-      note: t.why,
-    });
-    c.board = t.board;
-    c.column = t.column;
+    const r = CORE.promote(state, c, t.board);
+    if (!r.ok) { notice(r.message); return; }
     pendingMove = null;
     saveStore();
     closeModal();
     state.boardId = t.board;
     renderAll();
-    notice(t.why);
+    notice(r.why);
   }
 
   /* ----------------------------------------------------------- rendering */
@@ -582,54 +459,8 @@
   }
 
   // canonical card shapes per board — used by the creation form AND the agent API
-  function buildCard(boardId, id, fields) {
-    const b = QPT_DATA.boards.find((x) => x.id === boardId);
-    if (!b || !fields.title) return null;
-    const col = b.columns[0].id;
-    const title = String(fields.title).slice(0, 200);
-    if (boardId === "protocol") {
-      const source = fields.source === "initiated" ? "initiated" : "recruited";
-      const target = fields.target === "terminated" ? "terminated" : "grounded";
-      return {
-        id, board: boardId, column: col, title,
-        sign: source === "recruited" ? "⟨⦿○ ≈ ⊣○⟩" : "⟨⦿△ ≡ ⊣△⟩",
-        signName: source === "recruited" ? "Qualisign–Icon–Rheme" : "Legisign–Symbol–Argument",
-        source, target,
-        rho: 0.80, delta: 0.10, gamma: 0.25, k: 3, theta: 0.40,
-        scale: "meso", cycle: 0, pathology: null, death: null, axioms: ["A9"],
-        note: fields.note || "Practitioner-entered transformation. Metrics are initial estimates — revise them after [□]-encounter.",
-      };
-    }
-    if (boardId === "dialectic") {
-      if (fields.kind === "note") {
-        return {
-          id, board: boardId, column: col, kind: "note", title,
-          sign: "⟹ᵐⁿᵃᵛ¹ ⊗ |ᵍ ⊗ ⟹ᵐᵉᵐ", signName: "moderator note",
-          reliability: null, cycle: 0, axioms: ["A16"],
-          note: fields.note || "Practitioner-entered note.",
-        };
-      }
-      const rel = Math.max(0, Math.min(1, typeof fields.reliability === "number" ? fields.reliability : 0.70));
-      return {
-        id, board: boardId, column: col, kind: "position", agent: nextAgent(boardId), title,
-        sign: "⟨⦿△ ≡ ⊣α⟩", signName: "Legisign–Symbol–Abduction",
-        reliability: rel, cycle: 0, genesis: null, axioms: ["A19"],
-        note: fields.note || ("Practitioner-entered position. Γ starts at " + rel.toFixed(2) +
-              "; the moderator updates it by EMA as scores arrive (§19), and w is recomputed across the board."),
-      };
-    }
-    if (boardId === "resolution") {
-      return {
-        id, board: boardId, column: col, title,
-        sign: "⟨⦿□ ⇢ ⊣□⟩", signName: "Sinsign–Index–Dicisign",
-        cycle: 0,
-        tags: Array.isArray(fields.tags) ? fields.tags.filter((t) => typeof t === "string").slice(0, 8) : [],
-        axioms: ["ML"],
-        note: fields.note || "Practitioner-entered intervention.",
-      };
-    }
-    return null;
-  }
+  // canonical card shapes per board — used by the creation form AND the agent API
+  function buildCard(boardId, id, fields) { return CORE.buildCard(state, boardId, id, fields); }
 
   // entry-point creation: new cards enter at each board's first column only
   // (consistent with A13 — everything walks the workflow from its start)
@@ -1165,6 +996,7 @@
           });
         });
       },
+      skills: () => { renderSkills(); },
       gate: () => {
         addSection("The operator on which everything turns (§7)");
         R.formulas.forEach((f) => {
@@ -1658,114 +1490,25 @@
   const AGENT_URL = location.protocol === "file:" ? "http://localhost:8787" : location.origin;
 
   // compact state sent to the agent for reasoning
-  function compactState() {
-    return {
-      boardId: state.boardId,
-      boards: QPT_DATA.boards.map((b) => ({ id: b.id, columns: b.columns.map((c) => c.id) })),
-      cards: Object.values(state.cards).map((c) => {
-        const out = { id: c.id, board: c.board, column: c.column, title: c.title, sign: c.sign, cycle: c.cycle || 0 };
-        if (c.source != null) {
-          const ev = evaluate(c);
-          out.source = c.source; out.target = c.target;
-          out.rho = c.rho; out.delta = c.delta; out.gamma = c.gamma; out.k = c.k; out.theta = c.theta;
-          out.S = +scoreOf(c).toFixed(3);
-          out.verdict = ev && ev.key;
-        }
-        if (c.reliability != null) out.reliability = c.reliability;
-        if (c.kind) out.kind = c.kind;
-        if (c.agent) out.agent = c.agent;
-        if (c.genesis) out.genesis = c.genesis;
-        if (c.pathology) out.pathology = c.pathology;
-        if (c.death) out.death = c.death;
-        if (c.tags && c.tags.length) out.tags = c.tags;
-        return out;
-      }),
-    };
-  }
+  function compactState() { return CORE.compactState(state); }
 
   // what the agent (or anyone) may edit, with domain rules
-  const EDITABLE_KEYS = {
-    title: "str", note: "str", sign: "str", signName: "str", agent: "str",
-    source: ["recruited", "initiated"], target: ["grounded", "terminated"],
-    scale: ["micro", "meso", "macro"],
-    pathology: ["structural", "attentional", "content", "scalar", "temporal", null],
-    death: ["fossil", "residue", "imposition", null],
-    rho: "num01", delta: "num01", gamma: "num01", theta: "num01", reliability: "num01",
-    k: "k", genesis: "strnull",
-  };
-
-  function sanitizePatch(patch) {
-    const out = {};
-    Object.entries(patch || {}).forEach(([key, val]) => {
-      const rule = EDITABLE_KEYS[key];
-      if (key === "tags" && Array.isArray(val)) { out.tags = val.filter((t) => typeof t === "string").slice(0, 8); return; }
-      if (!rule) return;
-      if (rule === "str") out[key] = String(val).slice(0, key === "note" ? 2000 : 200);
-      else if (rule === "strnull") out[key] = val == null || val === "" ? null : String(val).slice(0, 200);
-      else if (rule === "num01") { const n = parseFloat(val); if (!isNaN(n)) out[key] = Math.max(0, Math.min(1, n)); }
-      else if (rule === "k") { const n = parseInt(val, 10); if (!isNaN(n)) out[key] = Math.max(1, Math.min(16, n)); }
-      else if (Array.isArray(rule) && rule.includes(val)) out[key] = val;
-    });
-    return out;
-  }
+  function sanitizePatch(patch) { return CORE.sanitizePatch(patch); }
 
   // execute one agent action through the same code paths as manual interaction
   function apiApply(a) {
     try {
-      switch (a.action) {
-        case "set_board": {
-          if (!QPT_DATA.boards.some((b) => b.id === a.board)) return { ok: false, message: "unknown board " + a.board };
-          state.boardId = a.board;
-          saveStore(); renderAll();
-          return { ok: true, message: "board → " + a.board };
-        }
-        case "create_card": {
-          const id = "custom-" + state.customSeq++;
-          const card = buildCard(a.board, id, a);
-          if (!card) return { ok: false, message: "cannot create card on board " + a.board };
-          state.cards[id] = card;
-          pushTrace(card, { action: "enters the workflow", from: "—", to: colName(a.board, card.column), note: "created by the Kimi agent" });
-          if (state.boardId !== a.board) state.boardId = a.board;
-          saveStore(); renderAll();
-          return { ok: true, message: "created “" + card.title + "” (" + id + ")", id };
-        }
-        case "move_card": {
-          const c = state.cards[a.id];
-          if (!c) return { ok: false, message: "no card " + a.id };
-          if (c.board !== state.boardId) { state.boardId = c.board; saveStore(); renderAll(); }
-          const chk = canMove(c, a.column);
-          if (!chk.ok) return { ok: false, message: chk.msg };
-          moveCard(a.id, a.column);
-          return { ok: true, message: a.id + " → " + a.column };
-        }
-        case "edit_card": {
-          const c = state.cards[a.id];
-          if (!c) return { ok: false, message: "no card " + a.id };
-          const patch = sanitizePatch(a.patch);
-          if (!Object.keys(patch).length) return { ok: false, message: "no editable fields in patch" };
-          Object.assign(c, patch);
-          if (c.board !== state.boardId) { state.boardId = c.board; saveStore(); renderAll(); }
-          applyEdit(c);
-          return { ok: true, message: "edited " + a.id + " (" + Object.keys(patch).join(", ") + ")" };
-        }
-        case "promote_card": {
-          const c = state.cards[a.id];
-          if (!c) return { ok: false, message: "no card " + a.id };
-          if (c.board !== state.boardId) { state.boardId = c.board; saveStore(); renderAll(); }
-          const t = promotionTargets(c).find((x) => x.board === a.board);
-          if (!t) return { ok: false, message: "no promotion path " + c.board + "/" + c.column + " → " + a.board };
-          promote(c, t);
-          return { ok: true, message: t.label };
-        }
-        case "evaluate_card": {
-          const c = state.cards[a.id];
-          if (!c) return { ok: false, message: "no card " + a.id };
-          const ev = evaluate(c);
-          return { ok: true, message: ev ? ev.label + " (S " + ev.S.toFixed(3) + ")" : "no gate fields on this card", result: ev };
-        }
-        default:
-          return { ok: false, message: "unknown action " + a.action };
+      a = Object.assign({ via: "the Kimi agent" }, a);
+      const r = CORE.applyAction(state, a);
+      if (!r.ok) return r;
+      if (a.action === "promote_card") { pendingMove = null; closeModal(); }
+      saveStore();
+      renderAll();
+      if (a.action === "edit_card") {
+        const c = state.cards[a.id];
+        if (c) { refreshView(c); retryPending(c); }
       }
+      return r;
     } catch (e) {
       return { ok: false, message: String((e && e.message) || e) };
     }
@@ -1789,30 +1532,78 @@
 
   async function agentSend(message) {
     agentSay("user", message);
-    const thinking = agentSay("agent thinking", "…");
+    const sendBtn = document.querySelector("#agent-form button");
+    sendBtn.disabled = true;
+    const bubble = agentSay("agent thinking", "…");
+    const t0 = Date.now();
+    let activity = "contacting the agent…";
+    const tick = setInterval(() => {
+      bubble.textContent = "⏳ " + Math.round((Date.now() - t0) / 1000) + "s · " + activity;
+    }, 400);
     try {
-      const res = await fetch(AGENT_URL + "/api/agent", {
+      const res = await fetch(AGENT_URL + "/api/agent?stream=1", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ message, state: compactState() }),
       });
-      const data = await res.json().catch(() => ({}));
-      thinking.remove();
-      if (!res.ok) {
-        agentSay("error", (data.error || "agent error " + res.status) + (data.hint ? " " + data.hint : ""));
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({}));
+        throw Object.assign(new Error(data.error || "agent error " + res.status), { hint: data.hint });
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "", result = null, errObj = null;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          if (!line.trim()) continue;
+          let ev;
+          try { ev = JSON.parse(line); } catch { continue; }
+          if (ev.type === "progress") activity = ev.detail;
+          else if (ev.type === "result") result = ev;
+          else if (ev.type === "error") errObj = ev;
+        }
+      }
+      clearInterval(tick);
+      bubble.remove();
+      if (errObj) {
+        agentSay("error", errObj.error + (errObj.hint ? " " + errObj.hint : ""));
         return;
       }
-      if (data.reply) agentSay("agent", data.reply);
-      (data.warnings || []).forEach((w) => agentSay("warn", "⚠ " + w));
-      for (const a of data.actions || []) {
-        const r = apiApply(a);
-        agentSay(r.ok ? "act" : "error", (r.ok ? "✓ " : "✗ ") + a.action + " — " + r.message);
-        await new Promise((res2) => setTimeout(res2, 350));
+      if (!result) {
+        agentSay("error", "The agent stream ended without a result — is the server up to date?");
+        return;
+      }
+      if (result.reply) agentSay("agent", result.reply);
+      (result.warnings || []).forEach((w) => agentSay("warn", "⚠ " + w));
+      if (remote.connected && result.results) {
+        // actions already executed on the server store — show results and adopt state
+        for (const r of result.results) {
+          agentSay(r.ok ? "act" : "error", (r.ok ? "✓ " : "✗ ") + r.action + " — " + r.message);
+          await new Promise((res2) => setTimeout(res2, 120));
+        }
+        const s = await (await fetch(AGENT_URL + "/api/state")).json();
+        adoptRemote(s);
+      } else {
+        for (const a of result.actions || []) {
+          const r = apiApply(a);
+          agentSay(r.ok ? "act" : "error", (r.ok ? "✓ " : "✗ ") + a.action + " — " + r.message);
+          await new Promise((res2) => setTimeout(res2, 350));
+        }
       }
     } catch (e) {
-      thinking.remove();
-      agentSay("error", "Cannot reach the agent server at " + AGENT_URL +
-        " — start it with `npm start` in qpt-ui/ (see README § Agent).");
+      clearInterval(tick);
+      bubble.remove();
+      const hint = e && e.hint ? " " + e.hint : "";
+      agentSay("error", (e && e.message ? e.message : "Cannot reach the agent server at " + AGENT_URL +
+        " — start it with `npm start` in qpt-ui/ (see README § Running it).") + hint);
+    } finally {
+      sendBtn.disabled = false;
     }
   }
 
@@ -1830,6 +1621,116 @@
     inp.value = "";
     agentSend(msg);
   });
+
+  /* CLI console — the same command language as POST /api/cli and node cli.js */
+  document.getElementById("cli-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const inp = document.getElementById("cli-input");
+    const cmd = inp.value.trim();
+    if (!cmd) return;
+    inp.value = "";
+    agentSay("user", "› " + cmd);
+    if (!remote.connected) {
+      agentSay("error", "The CLI runs on the server store — start the bridge (npm start).");
+      return;
+    }
+    try {
+      const r = await (await fetch(AGENT_URL + "/api/cli", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ command: cmd }),
+      })).json();
+      agentSay(r.ok ? "cli" : "error", r.output);
+      if (r.changed) {
+        const s = await (await fetch(AGENT_URL + "/api/state")).json();
+        adoptRemote(s);
+      }
+    } catch {
+      agentSay("error", "CLI endpoint unreachable at " + AGENT_URL + ".");
+    }
+  });
+
+  /* skills — list/edit/create against the server store */
+
+  async function renderSkills() {
+    const wrap = el("div", "skills-wrap");
+    $drawerBody.appendChild(wrap);
+    if (!remote.connected) {
+      wrap.appendChild(el("p", "m-note dim",
+        "Skills live in the server store — start the bridge (npm start) to create and access them. The agent reads them on every request."));
+      return;
+    }
+    let skills = [];
+    try {
+      skills = (await (await fetch(AGENT_URL + "/api/skills")).json()).skills || [];
+    } catch {
+      wrap.appendChild(el("p", "m-note dim", "Could not load skills from " + AGENT_URL + "."));
+      return;
+    }
+
+    skills.forEach((s) => {
+      const row = el("div", "skill-row");
+      const head = el("div", "skill-head");
+      head.appendChild(el("span", "skill-name", s.name));
+      head.appendChild(el("span", "chip axiom", s.id));
+      const del = el("button", "move-btn", "delete");
+      del.addEventListener("click", async () => {
+        await fetch(AGENT_URL + "/api/skills?id=" + encodeURIComponent(s.id), { method: "DELETE" });
+        drawerTab === "skills" && renderDrawer();
+      });
+      head.appendChild(del);
+      row.appendChild(head);
+      if (s.description) row.appendChild(el("p", "skill-desc", s.description));
+
+      const form = el("form", "skill-form");
+      const ta = el("textarea", "in");
+      ta.rows = 4;
+      ta.value = s.content || "";
+      const save = el("button", "move-btn", "save");
+      save.type = "submit";
+      form.appendChild(ta);
+      form.appendChild(save);
+      form.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        await fetch(AGENT_URL + "/api/skills", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: s.id, content: ta.value }),
+        });
+        notice("Skill " + s.id + " saved — the agent sees it on its next request.");
+      });
+      row.appendChild(form);
+      wrap.appendChild(row);
+    });
+
+    const create = el("form", "skill-form skill-create");
+    create.appendChild(el("h3", "d-section", "New skill"));
+    const name = el("input", "in");
+    name.placeholder = "name (e.g. Grounding protocol)";
+    name.required = true;
+    const desc = el("input", "in");
+    desc.placeholder = "one-line description (when should the agent use it?)";
+    const content = el("textarea", "in");
+    content.rows = 5;
+    content.placeholder = "Instructions for the agent — house rules, procedures, constraints…";
+    const btn = el("button", "move-btn", "create");
+    btn.type = "submit";
+    [name, desc, content].forEach((x) => create.appendChild(x));
+    create.appendChild(btn);
+    create.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const res = await fetch(AGENT_URL + "/api/skills", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: name.value, description: desc.value, content: content.value }),
+      });
+      const r = await res.json();
+      if (!res.ok) { notice(r.error || "could not create skill"); return; }
+      notice("Skill " + r.skill.id + " created.");
+      renderDrawer();
+    });
+    wrap.appendChild(create);
+  }
   window.addEventListener("resize", () => { if (tourIdx >= 0) showTourStep(); });
   document.querySelectorAll(".d-tab").forEach((t) => {
     t.addEventListener("click", () => { drawerTab = t.dataset.tab; renderDrawer(); });
@@ -1868,4 +1769,6 @@
   if (!learn.tourSeen && !params.get("notour") && !pc && !pd && !params.get("practice") && !params.get("sim")) {
     setTimeout(startTour, 600);
   }
+
+  remoteInit(); // hydrate from the server store when the bridge is up
 })();
