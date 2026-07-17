@@ -29,6 +29,7 @@
     <button class="btn" id="theme-btn">☀ Light</button>
     <button class="btn" id="practice-btn">▶ Practice</button>
     <button class="btn" id="sim-btn">◉ Sim</button>
+    <button class="btn" id="agent-btn">✦ Agent</button>
     <button class="btn" id="tour-btn">? Tour</button>
     <button class="btn" id="ref-btn">⌘ Reference</button>
     <button class="btn" id="reset-btn">Reset board</button>
@@ -115,6 +116,22 @@
     </div>
   </div>
 </div>
+
+<!-- agent chat panel -->
+<aside id="agent-panel">
+  <div class="drawer-head">
+    <h2>✦ Kimi Agent</h2>
+    <button class="modal-x" id="agent-close">✕</button>
+  </div>
+  <div id="agent-log">
+    <div class="agent-msg agent">Ask me to work the board — e.g. “escalate the fossil auth middleware to the resolution procedure”, “walk the haptics card through the gate”, or “create a position about caching”. My actions run through the same rules as your hands (A13, A9, §14, A7).</div>
+  </div>
+  <form id="agent-form">
+    <input id="agent-input" type="text" placeholder="Request a board action…" autocomplete="off">
+    <button class="btn" type="submit">Send</button>
+  </form>
+  <div class="agent-hint">Bridge: @moonshot-ai/kimi-agent-sdk → local kimi CLI. Requires <code>npm start</code> in qpt-ui/.</div>
+</aside>
 
 <!-- rejection / confirmation notices -->
 <div id="toast"></div>

@@ -581,6 +581,56 @@
     return b;
   }
 
+  // canonical card shapes per board — used by the creation form AND the agent API
+  function buildCard(boardId, id, fields) {
+    const b = QPT_DATA.boards.find((x) => x.id === boardId);
+    if (!b || !fields.title) return null;
+    const col = b.columns[0].id;
+    const title = String(fields.title).slice(0, 200);
+    if (boardId === "protocol") {
+      const source = fields.source === "initiated" ? "initiated" : "recruited";
+      const target = fields.target === "terminated" ? "terminated" : "grounded";
+      return {
+        id, board: boardId, column: col, title,
+        sign: source === "recruited" ? "⟨⦿○ ≈ ⊣○⟩" : "⟨⦿△ ≡ ⊣△⟩",
+        signName: source === "recruited" ? "Qualisign–Icon–Rheme" : "Legisign–Symbol–Argument",
+        source, target,
+        rho: 0.80, delta: 0.10, gamma: 0.25, k: 3, theta: 0.40,
+        scale: "meso", cycle: 0, pathology: null, death: null, axioms: ["A9"],
+        note: fields.note || "Practitioner-entered transformation. Metrics are initial estimates — revise them after [□]-encounter.",
+      };
+    }
+    if (boardId === "dialectic") {
+      if (fields.kind === "note") {
+        return {
+          id, board: boardId, column: col, kind: "note", title,
+          sign: "⟹ᵐⁿᵃᵛ¹ ⊗ |ᵍ ⊗ ⟹ᵐᵉᵐ", signName: "moderator note",
+          reliability: null, cycle: 0, axioms: ["A16"],
+          note: fields.note || "Practitioner-entered note.",
+        };
+      }
+      const rel = Math.max(0, Math.min(1, typeof fields.reliability === "number" ? fields.reliability : 0.70));
+      return {
+        id, board: boardId, column: col, kind: "position", agent: nextAgent(boardId), title,
+        sign: "⟨⦿△ ≡ ⊣α⟩", signName: "Legisign–Symbol–Abduction",
+        reliability: rel, cycle: 0, genesis: null, axioms: ["A19"],
+        note: fields.note || ("Practitioner-entered position. Γ starts at " + rel.toFixed(2) +
+              "; the moderator updates it by EMA as scores arrive (§19), and w is recomputed across the board."),
+      };
+    }
+    if (boardId === "resolution") {
+      return {
+        id, board: boardId, column: col, title,
+        sign: "⟨⦿□ ⇢ ⊣□⟩", signName: "Sinsign–Index–Dicisign",
+        cycle: 0,
+        tags: Array.isArray(fields.tags) ? fields.tags.filter((t) => typeof t === "string").slice(0, 8) : [],
+        axioms: ["ML"],
+        note: fields.note || "Practitioner-entered intervention.",
+      };
+    }
+    return null;
+  }
+
   // entry-point creation: new cards enter at each board's first column only
   // (consistent with A13 — everything walks the workflow from its start)
   function renderNewCardForm(board) {
@@ -627,48 +677,20 @@
       const title = input.value.trim();
       if (!title) return;
       const id = "custom-" + state.customSeq++;
-
+      const fields = { title };
       if (board.id === "protocol") {
-        const source = extras.src.value, target = extras.tgt.value;
-        state.cards[id] = {
-          id, board: board.id, column: firstCol, title,
-          sign: source === "recruited" ? "⟨⦿○ ≈ ⊣○⟩" : "⟨⦿△ ≡ ⊣△⟩",
-          signName: source === "recruited" ? "Qualisign–Icon–Rheme" : "Legisign–Symbol–Argument",
-          source, target,
-          rho: 0.80, delta: 0.10, gamma: 0.25, k: 3, theta: 0.40,
-          scale: "meso", cycle: 0, pathology: null, death: null, axioms: ["A9"],
-          note: "Practitioner-entered transformation. Metrics are initial estimates — revise them after [□]-encounter.",
-        };
+        fields.source = extras.src.value;
+        fields.target = extras.tgt.value;
       } else if (board.id === "dialectic") {
-        if (extras.kind.value === "position") {
-          const agent = nextAgent(board.id);
-          const rel = Math.max(0, Math.min(1, parseFloat(extras.rel.value) || 0.70));
-          state.cards[id] = {
-            id, board: board.id, column: firstCol, kind: "position", agent, title,
-            sign: "⟨⦿△ ≡ ⊣α⟩", signName: "Legisign–Symbol–Abduction",
-            reliability: rel, cycle: 0, genesis: null, axioms: ["A19"],
-            note: "Practitioner-entered position. Γ starts at " + rel.toFixed(2) +
-                  "; the moderator updates it by EMA as scores arrive (§19), and w is recomputed across the board.",
-          };
-        } else {
-          state.cards[id] = {
-            id, board: board.id, column: firstCol, kind: "note", title,
-            sign: "⟹ᵐⁿᵃᵛ¹ ⊗ |ᵍ ⊗ ⟹ᵐᵉᵐ", signName: "moderator note",
-            reliability: null, cycle: 0, axioms: ["A16"],
-            note: "Practitioner-entered note.",
-          };
-        }
+        fields.kind = extras.kind.value;
+        fields.reliability = parseFloat(extras.rel.value);
       } else {
-        state.cards[id] = {
-          id, board: board.id, column: firstCol, title,
-          sign: "⟨⦿□ ⇢ ⊣□⟩", signName: "Sinsign–Index–Dicisign",
-          cycle: 0,
-          tags: extras.tags.value.split(",").map((t) => t.trim()).filter(Boolean),
-          axioms: ["ML"],
-          note: "Practitioner-entered intervention.",
-        };
+        fields.tags = extras.tags.value.split(",").map((t) => t.trim()).filter(Boolean);
       }
-      pushTrace(state.cards[id], { action: "enters the workflow", from: "—",
+      const card = buildCard(board.id, id, fields);
+      if (!card) return;
+      state.cards[id] = card;
+      pushTrace(card, { action: "enters the workflow", from: "—",
         to: colName(board.id, firstCol), note: "created at the entry point" });
       saveStore();
       renderAll();
@@ -1630,6 +1652,184 @@
   document.getElementById("sim-back").addEventListener("click", simBack);
   document.getElementById("sim-auto").addEventListener("click", toggleSimAuto);
   document.getElementById("sim-exit").addEventListener("click", endSimulation);
+
+  /* ------------------------------------- agent bridge (browser surface) */
+
+  const AGENT_URL = location.protocol === "file:" ? "http://localhost:8787" : location.origin;
+
+  // compact state sent to the agent for reasoning
+  function compactState() {
+    return {
+      boardId: state.boardId,
+      boards: QPT_DATA.boards.map((b) => ({ id: b.id, columns: b.columns.map((c) => c.id) })),
+      cards: Object.values(state.cards).map((c) => {
+        const out = { id: c.id, board: c.board, column: c.column, title: c.title, sign: c.sign, cycle: c.cycle || 0 };
+        if (c.source != null) {
+          const ev = evaluate(c);
+          out.source = c.source; out.target = c.target;
+          out.rho = c.rho; out.delta = c.delta; out.gamma = c.gamma; out.k = c.k; out.theta = c.theta;
+          out.S = +scoreOf(c).toFixed(3);
+          out.verdict = ev && ev.key;
+        }
+        if (c.reliability != null) out.reliability = c.reliability;
+        if (c.kind) out.kind = c.kind;
+        if (c.agent) out.agent = c.agent;
+        if (c.genesis) out.genesis = c.genesis;
+        if (c.pathology) out.pathology = c.pathology;
+        if (c.death) out.death = c.death;
+        if (c.tags && c.tags.length) out.tags = c.tags;
+        return out;
+      }),
+    };
+  }
+
+  // what the agent (or anyone) may edit, with domain rules
+  const EDITABLE_KEYS = {
+    title: "str", note: "str", sign: "str", signName: "str", agent: "str",
+    source: ["recruited", "initiated"], target: ["grounded", "terminated"],
+    scale: ["micro", "meso", "macro"],
+    pathology: ["structural", "attentional", "content", "scalar", "temporal", null],
+    death: ["fossil", "residue", "imposition", null],
+    rho: "num01", delta: "num01", gamma: "num01", theta: "num01", reliability: "num01",
+    k: "k", genesis: "strnull",
+  };
+
+  function sanitizePatch(patch) {
+    const out = {};
+    Object.entries(patch || {}).forEach(([key, val]) => {
+      const rule = EDITABLE_KEYS[key];
+      if (key === "tags" && Array.isArray(val)) { out.tags = val.filter((t) => typeof t === "string").slice(0, 8); return; }
+      if (!rule) return;
+      if (rule === "str") out[key] = String(val).slice(0, key === "note" ? 2000 : 200);
+      else if (rule === "strnull") out[key] = val == null || val === "" ? null : String(val).slice(0, 200);
+      else if (rule === "num01") { const n = parseFloat(val); if (!isNaN(n)) out[key] = Math.max(0, Math.min(1, n)); }
+      else if (rule === "k") { const n = parseInt(val, 10); if (!isNaN(n)) out[key] = Math.max(1, Math.min(16, n)); }
+      else if (Array.isArray(rule) && rule.includes(val)) out[key] = val;
+    });
+    return out;
+  }
+
+  // execute one agent action through the same code paths as manual interaction
+  function apiApply(a) {
+    try {
+      switch (a.action) {
+        case "set_board": {
+          if (!QPT_DATA.boards.some((b) => b.id === a.board)) return { ok: false, message: "unknown board " + a.board };
+          state.boardId = a.board;
+          saveStore(); renderAll();
+          return { ok: true, message: "board → " + a.board };
+        }
+        case "create_card": {
+          const id = "custom-" + state.customSeq++;
+          const card = buildCard(a.board, id, a);
+          if (!card) return { ok: false, message: "cannot create card on board " + a.board };
+          state.cards[id] = card;
+          pushTrace(card, { action: "enters the workflow", from: "—", to: colName(a.board, card.column), note: "created by the Kimi agent" });
+          if (state.boardId !== a.board) state.boardId = a.board;
+          saveStore(); renderAll();
+          return { ok: true, message: "created “" + card.title + "” (" + id + ")", id };
+        }
+        case "move_card": {
+          const c = state.cards[a.id];
+          if (!c) return { ok: false, message: "no card " + a.id };
+          if (c.board !== state.boardId) { state.boardId = c.board; saveStore(); renderAll(); }
+          const chk = canMove(c, a.column);
+          if (!chk.ok) return { ok: false, message: chk.msg };
+          moveCard(a.id, a.column);
+          return { ok: true, message: a.id + " → " + a.column };
+        }
+        case "edit_card": {
+          const c = state.cards[a.id];
+          if (!c) return { ok: false, message: "no card " + a.id };
+          const patch = sanitizePatch(a.patch);
+          if (!Object.keys(patch).length) return { ok: false, message: "no editable fields in patch" };
+          Object.assign(c, patch);
+          if (c.board !== state.boardId) { state.boardId = c.board; saveStore(); renderAll(); }
+          applyEdit(c);
+          return { ok: true, message: "edited " + a.id + " (" + Object.keys(patch).join(", ") + ")" };
+        }
+        case "promote_card": {
+          const c = state.cards[a.id];
+          if (!c) return { ok: false, message: "no card " + a.id };
+          if (c.board !== state.boardId) { state.boardId = c.board; saveStore(); renderAll(); }
+          const t = promotionTargets(c).find((x) => x.board === a.board);
+          if (!t) return { ok: false, message: "no promotion path " + c.board + "/" + c.column + " → " + a.board };
+          promote(c, t);
+          return { ok: true, message: t.label };
+        }
+        case "evaluate_card": {
+          const c = state.cards[a.id];
+          if (!c) return { ok: false, message: "no card " + a.id };
+          const ev = evaluate(c);
+          return { ok: true, message: ev ? ev.label + " (S " + ev.S.toFixed(3) + ")" : "no gate fields on this card", result: ev };
+        }
+        default:
+          return { ok: false, message: "unknown action " + a.action };
+      }
+    } catch (e) {
+      return { ok: false, message: String((e && e.message) || e) };
+    }
+  }
+
+  window.QPT_API = {
+    getState: compactState,
+    apply: apiApply,
+    boards: QPT_DATA.boards.map((b) => b.id),
+  };
+
+  /* agent chat panel */
+
+  const $agentLog = document.getElementById("agent-log");
+  function agentSay(cls, text) {
+    const d = el("div", "agent-msg " + cls, text);
+    $agentLog.appendChild(d);
+    $agentLog.scrollTop = $agentLog.scrollHeight;
+    return d;
+  }
+
+  async function agentSend(message) {
+    agentSay("user", message);
+    const thinking = agentSay("agent thinking", "…");
+    try {
+      const res = await fetch(AGENT_URL + "/api/agent", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message, state: compactState() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      thinking.remove();
+      if (!res.ok) {
+        agentSay("error", (data.error || "agent error " + res.status) + (data.hint ? " " + data.hint : ""));
+        return;
+      }
+      if (data.reply) agentSay("agent", data.reply);
+      (data.warnings || []).forEach((w) => agentSay("warn", "⚠ " + w));
+      for (const a of data.actions || []) {
+        const r = apiApply(a);
+        agentSay(r.ok ? "act" : "error", (r.ok ? "✓ " : "✗ ") + a.action + " — " + r.message);
+        await new Promise((res2) => setTimeout(res2, 350));
+      }
+    } catch (e) {
+      thinking.remove();
+      agentSay("error", "Cannot reach the agent server at " + AGENT_URL +
+        " — start it with `npm start` in qpt-ui/ (see README § Agent).");
+    }
+  }
+
+  document.getElementById("agent-btn").addEventListener("click", () => {
+    document.getElementById("agent-panel").classList.toggle("open");
+  });
+  document.getElementById("agent-close").addEventListener("click", () => {
+    document.getElementById("agent-panel").classList.remove("open");
+  });
+  document.getElementById("agent-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const inp = document.getElementById("agent-input");
+    const msg = inp.value.trim();
+    if (!msg) return;
+    inp.value = "";
+    agentSend(msg);
+  });
   window.addEventListener("resize", () => { if (tourIdx >= 0) showTourStep(); });
   document.querySelectorAll(".d-tab").forEach((t) => {
     t.addEventListener("click", () => { drawerTab = t.dataset.tab; renderDrawer(); });
