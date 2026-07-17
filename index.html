@@ -30,6 +30,9 @@
     <button class="btn" id="practice-btn">▶ Practice</button>
     <button class="btn" id="sim-btn">◉ Sim</button>
     <button class="btn" id="agent-btn">✦ Agent</button>
+    <button class="btn" id="jobs-btn">◷ Jobs <span id="jobs-badge" class="badge hidden"></span>
+    </button>
+    <button class="btn" id="settings-btn">⚙ Settings</button>
     <button class="btn" id="tour-btn">? Tour</button>
     <button class="btn" id="ref-btn">⌘ Reference</button>
     <button class="btn" id="reset-btn">Reset board</button>
@@ -122,6 +125,7 @@
 <aside id="agent-panel">
   <div class="drawer-head">
     <h2>✦ Kimi Agent</h2>
+    <select id="model-select" class="model-select" title="Model for agent turns" aria-label="Model for agent turns"></select>
     <button class="modal-x" id="agent-close">✕</button>
   </div>
   <div id="agent-log">
@@ -135,7 +139,37 @@
     <span class="cli-prompt">›</span>
     <input id="cli-input" type="text" placeholder="CLI: cards · move p1 gate · edit p2 pathology=content · skills …" autocomplete="off" spellcheck="false">
   </form>
-  <div class="agent-hint">Bridge: @moonshot-ai/kimi-agent-sdk → local kimi CLI. Requires <code>npm start</code> in qpt-ui/.</div>
+  <div class="agent-hint">
+    <span>Bridge: @moonshot-ai/kimi-agent-sdk → local kimi CLI. Requires <code>npm start</code> in qpt-ui/.</span>
+    <button class="move-btn" id="skill-shortcut" title="Create and edit the skills the agent reads">＋ skill</button>
+  </div>
+</aside>
+
+<!-- settings page -->
+<div id="settings-page">
+  <div class="settings-frame">
+    <nav class="settings-nav">
+      <h2>⚙ Settings</h2>
+      <button class="s-tab active" data-section="skills">Skills</button>
+      <button class="s-tab" data-section="models">Models</button>
+      <button class="s-tab" data-section="keys">API Keys</button>
+      <button class="s-tab" data-section="prompt">System Prompt</button>
+      <button class="s-tab" data-section="mcp">MCP Servers</button>
+      <button class="s-tab" data-section="functions">Functions</button>
+      <button class="modal-x" id="settings-close">✕</button>
+    </nav>
+    <div id="settings-body"></div>
+  </div>
+</div>
+
+<!-- agentic jobs panel -->
+<aside id="jobs-panel">
+  <div class="drawer-head">
+    <h2>◷ Agent jobs</h2>
+    <button class="modal-x" id="jobs-close">✕</button>
+  </div>
+  <div id="jobs-list"></div>
+  <div class="agent-hint"><span>One worker, FIFO — agent turns and skill generations queue here. Cancel anytime; the queue survives closed panels.</span></div>
 </aside>
 
 <!-- rejection / confirmation notices -->

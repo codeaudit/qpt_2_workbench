@@ -7,6 +7,7 @@
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createSkill } from "./server-skills.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -27,10 +28,24 @@ export async function openStore() {
   let data = null;
   try { data = JSON.parse(await readFile(file, "utf8")); } catch { /* first run */ }
   if (!data || typeof data !== "object" || !data.cards) {
-    data = { version: 0, boardId: "protocol", customSeq: 0, cards: CORE.seedCards(), skills: [] };
+    data = { version: 0, boardId: "protocol", customSeq: 0, cards: CORE.seedCards() };
     await persist();
   }
-  if (!Array.isArray(data.skills)) data.skills = [];
+
+  // skills moved out of the JSON store → data/skills/<name>/SKILL.md (agentskills.io)
+  if (Array.isArray(data.skills)) {
+    for (const s of data.skills) {
+      try {
+        await createSkill({
+          name: s.id || s.name,
+          description: s.description || "migrated from the JSON store",
+          content: s.content || "",
+        });
+      } catch { /* exists already, or invalid — leave it */ }
+    }
+    delete data.skills;
+    await persist();
+  }
 
   async function persist() {
     await mkdir(path.dirname(file), { recursive: true });

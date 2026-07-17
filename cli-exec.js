@@ -2,20 +2,27 @@
  *
  * One executor shared by the HTTP endpoint (POST /api/cli), the standalone bin
  * (node cli.js "..."), and available to the agent. Mutations run through
- * qpt-core.js — the same enforcement as every other surface.
+ * qpt-core.js — the same enforcement as every other surface. Skills live on
+ * disk in the Agent Skills format (data/skills/<name>/SKILL.md).
  *
  *   help · state · boards · board <id> · cards [--board b] · card <id>
  *   create --board b --title "…" [--source s] [--target t] [--kind k] [--reliability n] [--tags a,b] [--note "…"]
  *   move <id> <column> · edit <id> key=value… · evaluate <id> · promote <id> --to <board> · reset
- *   skills · skill show <id> · skill create <id> [--name …] [--description …] [--content …]
+ *   skills · skill show <id> · skill create <id> --description "…" [--content "…"]
  *   skill edit <id> [name=…] [description=…] [content=…] · skill delete <id>
  */
 
+import { listSkills, readSkill, createSkill, updateSkill, deleteSkill } from "./server-skills.js";
+
 export function tokenize(s) {
   const out = [];
-  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  // key="quoted value" | key='quoted value' | key=value | "quoted" | 'quoted' | bare
+  const re = /(\S+?=)(?:"([^"]*)"|'([^']*)'|(\S+))|"([^"]*)"|'([^']*)'|(\S+)/g;
   let m;
-  while ((m = re.exec(s))) out.push(m[1] ?? m[2] ?? m[3]);
+  while ((m = re.exec(s))) {
+    if (m[1] !== undefined) out.push(m[1] + (m[2] ?? m[3] ?? m[4] ?? ""));
+    else out.push(m[5] ?? m[6] ?? m[7]);
+  }
   return out;
 }
 
@@ -34,9 +41,9 @@ const HELP = `qpt workbench CLI
   evaluate <id>                      gate verdict with S vs θ
   promote <id> --to <board>          cross-board promotion (paths per §15/§7.4/§11/§29)
   reset                              reseed the store from the specification
-  skills                             list skills
+  skills                             list skills (data/skills/<name>/SKILL.md)
   skill show <id>                    print a skill
-  skill create <id> [--name …] [--description …] [--content …]
+  skill create <id> --description "…" [--content "…"]
   skill edit <id> [name=…] [description=…] [content=…]
   skill delete <id>`;
 
@@ -149,57 +156,60 @@ export async function execCommand(line, store) {
       await store.reset();
       return ok("store reseeded from the specification", true);
 
-    case "skills":
-      if (!data.skills.length) return ok("(no skills)");
-      return ok(data.skills.map((s) => s.id + " — " + s.name + (s.description ? ": " + s.description : "")).join("\n"));
+    case "skills": {
+      const { skills, warnings } = await listSkills();
+      const lines = skills.map((s) => s.id + " — " + s.description.slice(0, 80) + (s.description.length > 80 ? "…" : ""));
+      warnings.forEach((w) => lines.push("⚠ " + w));
+      return ok(lines.length ? lines.join("\n") : "(no skills — data/skills/ is empty)");
+    }
 
     case "skill": {
       const sub = pos[0];
-      if (sub === "show") {
-        const s = findSkill(data.skills, pos[1]);
-        if (!s) return bad("no skill " + (pos[1] || "(missing id)"));
-        return ok("# " + s.name + " (" + s.id + ")\n" + (s.description || "") + "\n\n" + s.content);
-      }
-      if (sub === "create") {
-        const id = pos[1];
-        if (!id || !/^[a-z0-9][a-z0-9-]*$/.test(id)) return bad("skill id: lowercase slug, e.g. grounding-protocol");
-        if (findSkill(data.skills, id)) return bad("skill " + id + " already exists");
-        data.skills.push({
-          id,
-          name: flags.name || id,
-          description: flags.description || "",
-          content: flags.content || "",
-          updated: Date.now(),
-        });
-        await store.save();
-        return ok("skill created: " + id, true);
-      }
-      if (sub === "edit") {
-        const s = findSkill(data.skills, pos[1]);
-        if (!s) return bad("no skill " + (pos[1] || "(missing id)"));
-        const allowed = ["name", "description", "content"];
-        let n = 0;
-        for (const kv of pos.slice(2)) {
-          const eq = kv.indexOf("=");
-          if (eq < 0) return bad("skill edit: expected key=value, got " + JSON.stringify(kv));
-          const k = kv.slice(0, eq);
-          if (!allowed.includes(k)) return bad("skill edit: key must be " + allowed.join("|"));
-          s[k] = kv.slice(eq + 1);
-          n++;
+      try {
+        if (sub === "show") {
+          const { skills } = await listSkills();
+          const hit = findSkill(skills, pos[1]);
+          if (!hit) return bad("no skill " + (pos[1] || "(missing id)"));
+          const s = await readSkill(hit.id);
+          return ok("# " + s.name + " (" + s.id + ")\n" + s.description + "\n\n" + s.content);
         }
-        if (!n) return bad("skill edit: nothing to change");
-        s.updated = Date.now();
-        await store.save();
-        return ok("skill updated: " + s.id, true);
+        if (sub === "create") {
+          if (!pos[1]) return bad("usage: skill create <id> --description \"…\" [--content \"…\"]");
+          const s = await createSkill({
+            name: pos[1],
+            description: flags.description || "",
+            content: flags.content || "",
+          });
+          return ok("skill created: data/skills/" + s.id + "/SKILL.md", true);
+        }
+        if (sub === "edit") {
+          const { skills } = await listSkills();
+          const hit = findSkill(skills, pos[1]);
+          if (!hit) return bad("no skill " + (pos[1] || "(missing id)"));
+          const patch = {};
+          const allowed = ["name", "description", "content"];
+          for (const kv of pos.slice(2)) {
+            const eq = kv.indexOf("=");
+            if (eq < 0) return bad("skill edit: expected key=value, got " + JSON.stringify(kv));
+            const k = kv.slice(0, eq);
+            if (!allowed.includes(k)) return bad("skill edit: key must be " + allowed.join("|"));
+            patch[k] = kv.slice(eq + 1);
+          }
+          if (!Object.keys(patch).length) return bad("skill edit: nothing to change");
+          const s = await updateSkill(hit.id, patch);
+          return ok("skill updated: " + s.id, true);
+        }
+        if (sub === "delete") {
+          const { skills } = await listSkills();
+          const hit = findSkill(skills, pos[1]);
+          if (!hit) return bad("no skill " + (pos[1] || "(missing id)"));
+          await deleteSkill(hit.id);
+          return ok("skill deleted: " + hit.id, true);
+        }
+        return bad("skill: expected show|create|edit|delete");
+      } catch (e) {
+        return bad(String((e && e.message) || e));
       }
-      if (sub === "delete") {
-        const i = data.skills.findIndex((s) => s.id === pos[1] || s.name === pos[1]);
-        if (i < 0) return bad("no skill " + (pos[1] || "(missing id)"));
-        const gone = data.skills.splice(i, 1)[0];
-        await store.save();
-        return ok("skill deleted: " + gone.id, true);
-      }
-      return bad("skill: expected show|create|edit|delete");
     }
 
     default:

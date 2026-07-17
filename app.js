@@ -119,6 +119,11 @@
       const s = await (await fetch(AGENT_URL + "/api/state")).json();
       remote.connected = true;
       adoptRemote(s);
+      loadModels();
+      // the skills tab may have rendered the offline note before we connected
+      if (drawerTab === "skills" && document.getElementById("drawer").classList.contains("open")) {
+        renderDrawer();
+      }
       setInterval(remotePoll, 3000);
     } catch {
       remote.connected = false; // file:// / offline mode: localStorage only
@@ -1622,6 +1627,96 @@
     agentSend(msg);
   });
 
+  /* agentic jobs — common invoke + monitor for every long-running call */
+
+  const STATUS_ICON = { queued: "…", running: "▶", done: "✓", error: "✗", cancelled: "⊘" };
+
+  function jobTime(j) {
+    const now = Date.now();
+    if (j.status === "running" && j.startedAt) return Math.round((now - j.startedAt) / 1000) + "s";
+    if (j.status === "queued") return "queued " + Math.round((now - j.createdAt) / 1000) + "s";
+    if (j.startedAt && j.endedAt) return Math.round((j.endedAt - j.startedAt) / 1000) + "s";
+    return "";
+  }
+
+  async function refreshJobs() {
+    if (!remote.connected) return;
+    try {
+      const { jobs } = await (await fetch(AGENT_URL + "/api/jobs")).json();
+      updateBadge(jobs || []);
+      if (document.getElementById("jobs-panel").classList.contains("open")) renderJobs(jobs || []);
+    } catch { /* bridge hiccup — next tick */ }
+  }
+
+  function updateBadge(jobs) {
+    const n = (jobs || []).filter((j) => j.status === "queued" || j.status === "running").length;
+    const b = document.getElementById("jobs-badge");
+    b.textContent = n || "";
+    b.classList.toggle("hidden", !n);
+  }
+
+  function renderJobs(jobs) {
+    const list = document.getElementById("jobs-list");
+    list.innerHTML = "";
+    if (!jobs.length) {
+      list.appendChild(el("p", "m-note dim", "No jobs yet — ask the agent something, or generate a skill."));
+      return;
+    }
+    jobs.slice(0, 25).forEach((j) => {
+      const row = el("div", "job-row " + j.status);
+      const head = el("div", "job-head");
+      head.appendChild(el("span", "job-status " + j.status, STATUS_ICON[j.status] || "?"));
+      head.appendChild(el("span", "job-kind", j.kind));
+      head.appendChild(el("span", "job-time", jobTime(j)));
+      if (j.status === "queued" || j.status === "running") {
+        const c = el("button", "move-btn", "cancel");
+        c.addEventListener("click", async () => {
+          await fetch(AGENT_URL + "/api/jobs/" + j.id + "/cancel", { method: "POST" });
+          refreshJobs();
+        });
+        head.appendChild(c);
+      }
+      row.appendChild(head);
+      const last = j.progress && j.progress.length ? j.progress[j.progress.length - 1].detail : j.summary;
+      if (last) row.appendChild(el("div", "job-detail", last));
+      list.appendChild(row);
+    });
+  }
+
+  document.getElementById("jobs-btn").addEventListener("click", () => {
+    const p = document.getElementById("jobs-panel");
+    p.classList.toggle("open");
+    if (p.classList.contains("open")) refreshJobs();
+  });
+  document.getElementById("jobs-close").addEventListener("click", () => {
+    document.getElementById("jobs-panel").classList.remove("open");
+  });
+  setInterval(refreshJobs, 5000); // badge stays honest even with the panel closed
+
+  // submit any agentic job and watch it to completion (shared by generators)
+  async function runJob(kind, payload, onProgress) {
+    const { jobId, error } = await (await fetch(AGENT_URL + "/api/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind, ...payload }),
+    })).json();
+    if (!jobId) throw new Error(error || "could not submit job");
+    refreshJobs();
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 800));
+      const jr = await (await fetch(AGENT_URL + "/api/jobs/" + jobId)).json();
+      const last = jr.progress && jr.progress.length ? jr.progress[jr.progress.length - 1].detail : null;
+      if (onProgress) onProgress(jr.job.status, last);
+      refreshJobs();
+      if (jr.job.status === "done") return jr.result;
+      if (jr.job.status !== "queued" && jr.job.status !== "running") {
+        const e = new Error(jr.error || "job " + jr.job.status);
+        e.job = jr.job;
+        throw e;
+      }
+    }
+  }
+
   /* CLI console — the same command language as POST /api/cli and node cli.js */
   document.getElementById("cli-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -1650,6 +1745,57 @@
     }
   });
 
+  document.getElementById("skill-shortcut").addEventListener("click", () => {
+    openDrawer("skills");
+  });
+
+  /* model selection — runtime choice, applied to every agent turn */
+
+  async function loadModels() {
+    const sel = document.getElementById("model-select");
+    if (!remote.connected) {
+      sel.innerHTML = "";
+      sel.appendChild(el("option", null, "offline"));
+      sel.disabled = true;
+      return;
+    }
+    try {
+      const r = await (await fetch(AGENT_URL + "/api/models")).json();
+      sel.innerHTML = "";
+      const dflt = el("option", null, "CLI default" + (r.defaultModel ? " (" + r.defaultModel + ")" : ""));
+      dflt.value = "";
+      sel.appendChild(dflt);
+      (r.models || []).forEach((m) => {
+        const o = el("option", null, (m.name && m.name !== m.id ? m.name + " · " : "") + m.id);
+        o.value = m.id;
+        if (m.capabilities && m.capabilities.includes("thinking")) o.textContent += " ･thinks";
+        sel.appendChild(o);
+      });
+      sel.value = r.current && r.current !== r.defaultModel ? r.current : "";
+      sel.disabled = false;
+    } catch {
+      sel.innerHTML = "";
+      sel.appendChild(el("option", null, "models unavailable"));
+      sel.disabled = true;
+    }
+  }
+
+  document.getElementById("model-select").addEventListener("change", async (e) => {
+    const model = e.target.value;
+    try {
+      const r = await (await fetch(AGENT_URL + "/api/model", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model }),
+      })).json();
+      if (r.error) { notice(r.error); loadModels(); return; }
+      notice("Agent model → " + (r.current || "CLI default") + " (applies to the next turn).");
+      agentSay("cli", "model → " + (r.current || "CLI default"));
+    } catch {
+      notice("Could not set model — is the bridge running?");
+    }
+  });
+
   /* skills — list/edit/create against the server store */
 
   async function renderSkills() {
@@ -1657,7 +1803,8 @@
     $drawerBody.appendChild(wrap);
     if (!remote.connected) {
       wrap.appendChild(el("p", "m-note dim",
-        "Skills live in the server store — start the bridge (npm start) to create and access them. The agent reads them on every request."));
+        "Skills live in the server store — start the bridge (npm start) to create and access them here. The agent reads them on every request. " +
+        "Without the server you can still use the standalone CLI: node cli.js \"skill create <id> --name … --content …\""));
       return;
     }
     let skills = [];
@@ -1667,6 +1814,12 @@
       wrap.appendChild(el("p", "m-note dim", "Could not load skills from " + AGENT_URL + "."));
       return;
     }
+
+    const head = el("div", "skills-head");
+    head.appendChild(el("p", "m-note dim", "Instruction sets the agent reads on every request — your house rules for it."));
+    const newBtn = el("button", "btn", "＋ New skill");
+    head.appendChild(newBtn);
+    wrap.appendChild(head);
 
     skills.forEach((s) => {
       const row = el("div", "skill-row");
@@ -1705,6 +1858,17 @@
 
     const create = el("form", "skill-form skill-create");
     create.appendChild(el("h3", "d-section", "New skill"));
+
+    // invoke the skill-generator skill: hint → draft, review, then create
+    const genRow = el("div", "skill-gen");
+    const hint = el("input", "in");
+    hint.placeholder = "✦ or describe the skill you want… (e.g. “audit card titles for jargon”)";
+    const genBtn = el("button", "move-btn gen-btn", "generate");
+    genBtn.type = "button";
+    genRow.appendChild(hint);
+    genRow.appendChild(genBtn);
+    create.appendChild(genRow);
+
     const name = el("input", "in");
     name.placeholder = "name (e.g. Grounding protocol)";
     name.required = true;
@@ -1715,6 +1879,32 @@
     content.placeholder = "Instructions for the agent — house rules, procedures, constraints…";
     const btn = el("button", "move-btn", "create");
     btn.type = "submit";
+
+    genBtn.addEventListener("click", async () => {
+      const h = hint.value.trim();
+      if (!h) { hint.focus(); return; }
+      genBtn.disabled = true;
+      genBtn.textContent = "queued…";
+      const status = el("span", "gen-status", "");
+      genRow.appendChild(status);
+      try {
+        const result = await runJob("generate", { hint: h }, (st, detail) => {
+          genBtn.textContent = st + "…";
+          status.textContent = detail || "";
+        });
+        name.value = result.draft.name;
+        desc.value = result.draft.description;
+        content.value = result.draft.content;
+        notice("Draft by “skill-generator” — review, edit, then create.");
+        name.focus();
+      } catch (err) {
+        notice(err && err.message ? err.message : "generation failed");
+      }
+      status.remove();
+      genBtn.disabled = false;
+      genBtn.textContent = "generate";
+    });
+
     [name, desc, content].forEach((x) => create.appendChild(x));
     create.appendChild(btn);
     create.addEventListener("submit", async (ev) => {
@@ -1730,6 +1920,56 @@
       renderDrawer();
     });
     wrap.appendChild(create);
+
+    newBtn.addEventListener("click", () => {
+      create.scrollIntoView({ block: "center" });
+      name.focus();
+    });
+
+    // browse every scope the CLI discovers (user · project · extra)
+    try {
+      const all = await (await fetch(AGENT_URL + "/api/skills/all")).json();
+      (all.scopes || []).filter((sc) => sc.scope !== "workbench").forEach((sc) => {
+        const sec = el("div", "skill-scope");
+        sec.appendChild(el("h3", "d-section",
+          sc.scope + " skills" + (sc.skills.length ? " (" + sc.skills.length + ")" : "")));
+        sec.appendChild(el("p", "skill-dir", sc.dir));
+        if (!sc.skills.length) {
+          sec.appendChild(el("p", "m-note dim", "(none found)"));
+          wrap.appendChild(sec);
+          return;
+        }
+        sc.skills.forEach((s) => {
+          const det = el("details", "skill-row" + (s.shadowed ? " shadowed" : ""));
+          const sum = el("summary", "skill-head");
+          sum.appendChild(el("span", "skill-name", s.name));
+          if (s.shadowed) sum.appendChild(el("span", "chip death", "shadowed"));
+          const imp = el("button", "move-btn", "import");
+          imp.title = "Copy into the workbench store so the agent uses it";
+          imp.addEventListener("click", async (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const res = await fetch(AGENT_URL + "/api/skills/import", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ id: s.id }),
+            });
+            const r = await res.json();
+            notice(res.ok ? "Imported “" + s.id + "” into the workbench skills." : (r.error || "import failed"));
+            if (res.ok) renderDrawer();
+          });
+          sum.appendChild(imp);
+          det.appendChild(sum);
+          if (s.description) det.appendChild(el("p", "skill-desc", s.description));
+          det.appendChild(el("pre", "skill-body", (s.content || "(no body)").slice(0, 4000)));
+          sec.appendChild(det);
+        });
+        wrap.appendChild(sec);
+      });
+      if (all.builtin) wrap.appendChild(el("p", "m-note dim", all.builtin));
+    } catch {
+      wrap.appendChild(el("p", "m-note dim", "Could not browse external skill scopes."));
+    }
   }
   window.addEventListener("resize", () => { if (tourIdx >= 0) showTourStep(); });
   document.querySelectorAll(".d-tab").forEach((t) => {
@@ -1738,6 +1978,256 @@
   $drawerSearch.addEventListener("input", () => renderDrawer());
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { closeModal(); closeDrawer(); closePractice(); }
+  });
+
+  /* ------------------------------------------------------- settings page */
+
+  let settingsSection = "skills";
+
+  async function openSettings() {
+    document.getElementById("settings-page").classList.add("open");
+    renderSettings();
+  }
+  function closeSettings() { document.getElementById("settings-page").classList.remove("open"); }
+
+  async function renderSettings() {
+    document.querySelectorAll(".s-tab").forEach((t) => t.classList.toggle("active", t.dataset.section === settingsSection));
+    const body = document.getElementById("settings-body");
+    body.innerHTML = "";
+    if (!remote.connected) {
+      body.appendChild(el("p", "m-note dim", "Settings live on the server — start the bridge (npm start)."));
+      return;
+    }
+    const get = (p) => fetch(AGENT_URL + p).then((r) => r.json());
+    const post = (p, data, method) => fetch(AGENT_URL + p, {
+      method: method || "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(data || {}),
+    }).then((r) => r.json());
+
+    if (settingsSection === "skills") {
+      const all = await get("/api/skills/all");
+      body.appendChild(el("h3", "d-section", "All skills on the system (browse; edit in Reference → Skills)"));
+      (all.scopes || []).forEach((sc) => {
+        body.appendChild(el("h4", "s-h4", sc.scope + " — " + sc.skills.length));
+        body.appendChild(el("p", "skill-dir", sc.dir));
+        sc.skills.forEach((s) => {
+          const row = el("div", "skill-row");
+          const head = el("div", "skill-head");
+          head.appendChild(el("span", "skill-name", s.name));
+          head.appendChild(el("span", "chip axiom", s.scope));
+          row.appendChild(head);
+          if (s.description) row.appendChild(el("p", "skill-desc", s.description));
+          body.appendChild(row);
+        });
+      });
+      return;
+    }
+
+    if (settingsSection === "models") {
+      const r = await get("/api/models");
+      body.appendChild(el("h3", "d-section", "Model for agent turns"));
+      const sel = el("select", "in");
+      const dflt = el("option", null, "CLI default" + (r.defaultModel ? " (" + r.defaultModel + ")" : ""));
+      dflt.value = "";
+      sel.appendChild(dflt);
+      (r.models || []).forEach((m) => {
+        const o = el("option", null, m.name + " · " + m.id);
+        o.value = m.id;
+        sel.appendChild(o);
+      });
+      sel.value = r.current && r.current !== r.defaultModel ? r.current : "";
+      sel.addEventListener("change", async () => {
+        const res = await post("/api/model", { model: sel.value });
+        notice(res.error || "Agent model → " + (res.current || "CLI default"));
+        renderSettings();
+      });
+      body.appendChild(sel);
+      body.appendChild(el("h3", "d-section", "Registered models (" + (r.models || []).length + ", from " + (r.source || "?") + ")"));
+      (r.models || []).forEach((m) => {
+        const row = el("div", "skill-row");
+        const head = el("div", "skill-head");
+        head.appendChild(el("span", "skill-name", m.name));
+        if (m.id === r.defaultModel) head.appendChild(el("span", "chip living", "default"));
+        row.appendChild(head);
+        row.appendChild(el("p", "skill-desc",
+          m.id + (m.provider ? " · " + m.provider : "") +
+          (m.maxContextSize ? " · ctx " + Math.round(m.maxContextSize / 1024) + "k" : "") +
+          (m.capabilities && m.capabilities.length ? " · " + m.capabilities.join(", ") : "")));
+        body.appendChild(row);
+      });
+      return;
+    }
+
+    if (settingsSection === "keys") {
+      const r = await get("/api/keys");
+      body.appendChild(el("h3", "d-section", "API keys — injected as environment variables into every agent turn"));
+      body.appendChild(el("p", "m-note dim", "Stored in data/config.json (gitignored). Values are write-only: shown masked, never returned in full."));
+      (r.keys || []).forEach((k) => {
+        const row = el("div", "skill-row");
+        const head = el("div", "skill-head");
+        head.appendChild(el("span", "skill-name mono", k.name));
+        head.appendChild(el("span", "chip scale", k.masked));
+        const del = el("button", "move-btn", "delete");
+        del.addEventListener("click", async () => {
+          await fetch(AGENT_URL + "/api/keys?name=" + encodeURIComponent(k.name), { method: "DELETE" });
+          renderSettings();
+        });
+        head.appendChild(del);
+        row.appendChild(head);
+        body.appendChild(row);
+      });
+      const form = el("form", "skill-form");
+      const n = el("input", "in"); n.placeholder = "NAME (e.g. TAVILY_API_KEY)"; n.required = true;
+      const v = el("input", "in"); v.placeholder = "value — stored, never displayed again"; v.type = "password"; v.required = true;
+      const b = el("button", "move-btn", "add key"); b.type = "submit";
+      [n, v].forEach((x) => form.appendChild(x));
+      form.appendChild(b);
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const res = await post("/api/keys", { name: n.value, value: v.value });
+        if (res.error) { notice(res.error); return; }
+        notice("Key " + n.value + " stored (visible to agent turns as an env var).");
+        renderSettings();
+      });
+      body.appendChild(form);
+      return;
+    }
+
+    if (settingsSection === "prompt") {
+      const r = await get("/api/settings");
+      body.appendChild(el("h3", "d-section", "System prompt for agent turns"));
+      body.appendChild(el("p", "m-note dim",
+        r.systemPrompt ? "Custom override active — every agent turn uses the text below." : "No override — the built-in default is used (shown below for editing)."));
+      const ta = el("textarea", "in prompt-edit");
+      ta.rows = 18;
+      ta.value = r.systemPrompt || r.defaultSystemPrompt;
+      body.appendChild(ta);
+      const row = el("div", "ed-row end");
+      const save = el("button", "move-btn", "save override");
+      const reset = el("button", "move-btn", "reset to default");
+      save.addEventListener("click", async () => {
+        await post("/api/settings", { systemPrompt: ta.value }, "PUT");
+        notice("System prompt override saved — applies to the next turn.");
+        renderSettings();
+      });
+      reset.addEventListener("click", async () => {
+        await post("/api/settings", { systemPrompt: "" }, "PUT");
+        notice("Override cleared — back to the built-in prompt.");
+        renderSettings();
+      });
+      row.appendChild(reset); row.appendChild(save);
+      body.appendChild(row);
+      return;
+    }
+
+    if (settingsSection === "mcp") {
+      const r = await get("/api/mcp");
+      body.appendChild(el("h3", "d-section", "MCP servers (managed)"));
+      body.appendChild(el("p", "m-note dim", "Synced to the project-level " + (r.projectMcpPath || ".kimi-code/mcp.json") + " that agent turns load. stdio servers execute their command when a session starts — only add servers you trust."));
+      const entries = Object.entries(r.mcpServers || {});
+      if (!entries.length) body.appendChild(el("p", "m-note dim", "(none configured)"));
+      entries.forEach(([name, e2]) => {
+        const row = el("div", "skill-row");
+        const head = el("div", "skill-head");
+        head.appendChild(el("span", "skill-name mono", name));
+        head.appendChild(el("span", "chip second", e2.command ? "stdio" : (e2.transport === "sse" ? "sse" : "http")));
+        if (e2.enabled === false) head.appendChild(el("span", "chip death", "disabled"));
+        const del = el("button", "move-btn", "delete");
+        del.addEventListener("click", async () => {
+          await fetch(AGENT_URL + "/api/mcp?name=" + encodeURIComponent(name), { method: "DELETE" });
+          renderSettings();
+        });
+        head.appendChild(del);
+        row.appendChild(head);
+        row.appendChild(el("p", "skill-desc mono", e2.command ? e2.command + " " + (e2.args || []).join(" ") : e2.url));
+        body.appendChild(row);
+      });
+      const form = el("form", "skill-form");
+      form.appendChild(el("h3", "d-section", "Add server"));
+      const n = el("input", "in"); n.placeholder = "name (e.g. filesystem)"; n.required = true;
+      const t = el("select", "in");
+      t.innerHTML = '<option value="stdio">stdio (command)</option><option value="http">http (url)</option><option value="sse">sse (url)</option>';
+      const c = el("input", "in"); c.placeholder = 'command + args, e.g. npx -y @modelcontextprotocol/server-filesystem /tmp';
+      const u = el("input", "in"); u.placeholder = "or url, e.g. https://mcp.example.com/mcp"; u.style.display = "none";
+      t.addEventListener("change", () => { c.style.display = t.value === "stdio" ? "" : "none"; u.style.display = t.value === "stdio" ? "none" : ""; });
+      const b = el("button", "move-btn", "add server"); b.type = "submit";
+      [n, t, c, u].forEach((x) => form.appendChild(x));
+      form.appendChild(b);
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        let entry;
+        if (t.value === "stdio") {
+          const parts = c.value.trim().split(/\s+/);
+          entry = { command: parts[0], args: parts.slice(1) };
+        } else {
+          entry = { url: u.value.trim(), transport: t.value === "sse" ? "sse" : undefined };
+        }
+        const res = await post("/api/mcp", { name: n.value, entry });
+        if (res.error) { notice(res.error); return; }
+        notice("MCP server " + n.value + " configured — agent sessions started after this point can use it.");
+        renderSettings();
+      });
+      body.appendChild(form);
+      return;
+    }
+
+    if (settingsSection === "functions") {
+      const r = await get("/api/functions");
+      body.appendChild(el("h3", "d-section", "User functions (data/functions/*.js)"));
+      body.appendChild(el("p", "m-note dim", "Contract: read {args, state} as JSON on stdin, print one JSON {message, actions?} on stdout. Returned actions execute through the same core rules — functions compute, the spec enforces."));
+      (r.functions || []).forEach((f) => {
+        const row = el("div", "skill-row");
+        const head = el("div", "skill-head");
+        head.appendChild(el("span", "skill-name mono", f.name));
+        head.appendChild(el("span", "chip scale", f.lines + " lines"));
+        const runB = el("button", "move-btn", "run");
+        const del = el("button", "move-btn", "delete");
+        head.appendChild(runB); head.appendChild(del);
+        row.appendChild(head);
+        if (f.description) row.appendChild(el("p", "skill-desc", f.description));
+        const argsIn = el("input", "in mono"); argsIn.placeholder = 'args JSON, e.g. {"column":"gate"}';
+        const out = el("pre", "skill-body");
+        out.style.display = "none";
+        runB.addEventListener("click", async () => {
+          let args = {};
+          try { args = argsIn.value.trim() ? JSON.parse(argsIn.value) : {}; } catch { notice("args must be JSON"); return; }
+          out.style.display = "";
+          out.textContent = "running…";
+          const res = await post("/api/functions/" + f.name + "/run", { args });
+          out.textContent = res.error ? ("✗ " + res.error) : (JSON.stringify(res.output, null, 1) + (res.applied && res.applied.length ? "\napplied: " + res.applied.map((a) => (a.ok ? "✓" : "✗") + " " + a.message).join("\n") : ""));
+        });
+        del.addEventListener("click", async () => {
+          await fetch(AGENT_URL + "/api/functions?name=" + encodeURIComponent(f.name), { method: "DELETE" });
+          renderSettings();
+        });
+        row.appendChild(argsIn);
+        row.appendChild(out);
+        body.appendChild(row);
+      });
+      const form = el("form", "skill-form");
+      form.appendChild(el("h3", "d-section", "New function"));
+      const n = el("input", "in"); n.placeholder = "name (slug, e.g. gate-report)"; n.required = true;
+      const code = el("textarea", "in mono"); code.rows = 10;
+      code.value = '// @description What this does and when to call it\nlet input = "";\nprocess.stdin.on("data", (d) => (input += d)).on("end", () => {\n  const { args, state } = JSON.parse(input);\n  const cards = state.cards || [];\n  console.log(JSON.stringify({ message: "cards: " + cards.length, actions: [] }));\n});';
+      const b = el("button", "move-btn", "save function"); b.type = "submit";
+      form.appendChild(n); form.appendChild(code); form.appendChild(b);
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const res = await post("/api/functions", { name: n.value, code: code.value });
+        if (res.error) { notice(res.error); return; }
+        notice("Function " + n.value + " saved — the agent can call it via run_function.");
+        renderSettings();
+      });
+      body.appendChild(form);
+      return;
+    }
+  }
+
+  document.getElementById("settings-btn").addEventListener("click", openSettings);
+  document.getElementById("settings-close").addEventListener("click", closeSettings);
+  document.querySelectorAll(".s-tab").forEach((t) => {
+    t.addEventListener("click", () => { settingsSection = t.dataset.section; renderSettings(); });
   });
 
   learnLoad();
