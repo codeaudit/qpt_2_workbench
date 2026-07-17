@@ -8,6 +8,7 @@
  *        createdAt, startedAt, endedAt, progress[], result, error, emitter }
  */
 import { EventEmitter } from "node:events";
+import { log } from "./server-log.js";
 
 const HANDLERS = {};
 const jobs = new Map();
@@ -47,6 +48,7 @@ export function submitJob(kind, payload) {
   jobs.set(job.id, job);
   queue.push(job.id);
   trimHistory();
+  log.info("job.submit", { id: job.id, kind });
   broadcast();
   pump();
   return job;
@@ -69,6 +71,7 @@ async function pump() {
   running = true;
   job.status = "running";
   job.startedAt = Date.now();
+  log.info("job.start", { id: job.id, kind: job.kind, queuedMs: job.startedAt - job.createdAt });
   broadcast();
   try {
     job.result = await HANDLERS[job.kind](job);
@@ -77,9 +80,11 @@ async function pump() {
     if (job.status !== "cancelled") {
       job.error = String((e && e.message) || e);
       job.status = "error";
+      log.warn("job.error", { id: job.id, kind: job.kind, error: job.error.slice(0, 200) });
     }
   }
   job.endedAt = Date.now();
+  log.info("job.end", { id: job.id, kind: job.kind, status: job.status, ms: job.endedAt - job.startedAt });
   job.emitter.emit("done", job);
   broadcast();
   running = false;
@@ -106,6 +111,7 @@ export function cancelJob(id) {
     job.endedAt = Date.now();
     job.emitter.emit("done", job);
   }
+  log.info("job.cancel", { id, status: job.status });
   broadcast();
   return job;
 }

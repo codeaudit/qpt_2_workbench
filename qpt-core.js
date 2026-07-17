@@ -345,6 +345,7 @@
           const card = buildCard(state, a.board, id, a);
           if (!card) return { ok: false, message: "cannot create card on board " + a.board };
           state.cards[id] = card;
+          ensureHandles(state.cards); // assigns a unique CamelCase handle (idempotent)
           pushTrace(card, { action: "enters the workflow", from: "—", to: colName(a.board, card.column), note: "created via " + (a.via || "the workbench") });
           state.boardId = a.board;
           return { ok: true, message: "created “" + card.title + "” (" + id + ")", id };
@@ -389,12 +390,53 @@
 
     /* ------------------------------------------------------------- misc */
 
+    // stable CamelCase handles for referencing (@OnboardingDropoff).
+    // Assigned once at creation/seed/migration, deduped, and never re-derived
+    // from renames — references must not break when a title changes.
+    const HANDLE_STOP = new Set(["the", "a", "an", "here"]);
+    function toCamelCase(title) {
+      let words = String(title || "").replace(/[^a-zA-Z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+      while (words.length > 1 && HANDLE_STOP.has(words[0].toLowerCase())) words = words.slice(1);
+      words = words.slice(0, 5);
+      const cc = words.map((w) => w[0].toUpperCase() + w.slice(1)).join("");
+      return cc || "Card";
+    }
+
+    // ensure every card in the map has a unique handle; mutates in place
+    function ensureHandles(cards) {
+      const taken = new Set(
+        Object.values(cards).map((c) => (c.handle || "").toLowerCase()).filter(Boolean)
+      );
+      let changed = false;
+      Object.values(cards).forEach((c) => {
+        if (c.handle) return;
+        const base = toCamelCase(c.title || c.id);
+        let h = base, n = 2;
+        while (taken.has(h.toLowerCase())) h = base + n++;
+        taken.add(h.toLowerCase());
+        c.handle = h;
+        changed = true;
+      });
+      return changed;
+    }
+
+    // resolve a reference: id, @handle, handle, exact title, or title substring
+    function findCard(cards, ref) {
+      const key = String(ref || "").replace(/^@/, "");
+      if (cards[key]) return cards[key];
+      const lower = key.toLowerCase();
+      return Object.values(cards).find((c) => (c.handle || "").toLowerCase() === lower)
+        || Object.values(cards).find((c) => (c.title || "").toLowerCase() === lower)
+        || Object.values(cards).find((c) => (c.title || "").toLowerCase().includes(lower))
+        || null;
+    }
+
     function compactState(state) {
       return {
         boardId: state.boardId,
         boards: boards.map((b) => ({ id: b.id, columns: b.columns.map((c) => c.id) })),
         cards: Object.values(state.cards).map((c) => {
-          const out = { id: c.id, board: c.board, column: c.column, title: c.title, sign: c.sign, cycle: c.cycle || 0 };
+          const out = { id: c.id, handle: c.handle, board: c.board, column: c.column, title: c.title, sign: c.sign, cycle: c.cycle || 0 };
           if (c.source != null) {
             const ev = evaluate(c);
             out.source = c.source; out.target = c.target;
@@ -420,6 +462,7 @@
         cards[c.id] = clone(c);
         cards[c.id].board = b.id;
       }));
+      ensureHandles(cards);
       return cards;
     }
 
@@ -429,6 +472,7 @@
       pushTrace, onTransition, applyMove, canMove,
       nextAgent, buildCard, sanitizePatch, EDITABLE_KEYS,
       promotionTargets, promote, applyAction, compactState, seedCards,
+      toCamelCase, ensureHandles, findCard,
     };
   }
 

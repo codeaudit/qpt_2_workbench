@@ -24,6 +24,7 @@ import { listSkills, readSkill, createSkill, updateSkill, deleteSkill, listAllSk
 import { registerHandler, submitJob, getJob, listJobs, cancelJob, note } from "./server-jobs.js";
 import { loadSettings } from "./server-settings.js";
 import { listFunctions, readFunction, writeFunction, deleteFunction, runFunction } from "./server-functions.js";
+import { log } from "./server-log.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, ".."); // project root (the spec lives here)
@@ -75,7 +76,7 @@ ACTION VOCABULARY (reply with ONLY a JSON object, no prose outside it)
   {"action": "evaluate_card", "id": "..."},
   {"action": "run_function", "name": "...", "args": {...}}
  ]}
-Use only the fields each action needs. create_card: source/target only matter on protocol; kind/reliability only on dialectic; tags only on resolution. Card ids in the state are current — use them verbatim. At most 12 actions; order them so each is legal when it runs (remember horizon = 1: multi-column journeys need one move per column).
+Use only the fields each action needs. create_card: source/target only matter on protocol; kind/reliability only on dialectic; tags only on resolution. Card ids in the state are current — use them verbatim. Cards also carry a stable CamelCase HANDLE (e.g. OnboardingDropoff): when the user writes @Handle, that is the card they mean — address it by its id in actions. At most 12 actions; order them so each is legal when it runs (remember horizon = 1: multi-column journeys need one move per column).
 
 EXECUTION: your actions run on the canonical server-side store via the shared domain core — the same code the UI uses. Anything illegal comes back refused in the results.
 
@@ -161,8 +162,11 @@ function detectBackend() {
         const help = await new Promise((res, rej) => {
           execFile(EXE, ["--help"], { timeout: 8000 }, (e, stdout) => (e ? rej(e) : res(stdout)));
         });
-        return help.includes("--wire") ? "sdk" : "compat";
-      } catch {
+        const backend = help.includes("--wire") ? "sdk" : "compat";
+        log.info("agent.backend", { backend, executable: EXE });
+        return backend;
+      } catch (e) {
+        log.warn("agent.backend.fallback", { backend: "compat", reason: String((e && e.message) || e).slice(0, 120) });
         return "compat";
       }
     })();
@@ -238,6 +242,7 @@ async function runAgentCompat(message, state, onProgress, instructions, cancelRe
   return new Promise((resolve, reject) => {
     const child = spawn(EXE, args, { cwd: ROOT, env: { ...process.env, ...settings.envForAgent() } });
     if (cancelReg) cancelReg(() => child.kill("SIGKILL"));
+    log.debug("agent.spawn", { backend: "compat", model: currentModel || "default", promptBytes: args[1].length });
     const t0 = Date.now();
     let buf = "", errBuf = "";
     const parts = [];
@@ -287,7 +292,9 @@ async function runAgentCompat(message, state, onProgress, instructions, cancelRe
       clearTimeout(timer);
       if (hb) clearInterval(hb);
       if (buf.trim()) handleLine(buf); // unterminated last line
+      log.debug("agent.spawn.exit", { code, ms: Date.now() - t0, replyBytes: parts.join("\n").length });
       if (code !== 0) {
+        log.warn("agent.spawn.failed", { code, stderr: errBuf.slice(0, 200) });
         return reject(new Error("CLI exited with code " + code + (errBuf ? ": " + errBuf.slice(0, 300) : "")));
       }
       resolve(parts.join("\n"));
@@ -383,6 +390,57 @@ function sendJson(res, code, obj) {
   res.end(body);
 }
 
+/* ------------------------------------------- reference expansion (@ / /)
+ *
+ * Chat payloads carry plain text; tokens like @p1 or /grounding-protocol are
+ * resolved HERE, server-side, so the model receives the actual context:
+ * full card records for @references, full SKILL.md content for /invocations.
+ */
+async function expandReferences(message) {
+  const refs = { skills: [], cards: [] };
+  if (!message) return refs;
+  const usedSkills = new Set();
+  const usedCards = new Set();
+
+  const cardTokens = message.match(/@([\w-]+)/g) || [];
+  for (const raw of cardTokens) {
+    const hit = store.CORE.findCard(store.data.cards, raw.slice(1));
+    if (hit && !usedCards.has(hit.id)) {
+      usedCards.add(hit.id);
+      refs.cards.push(hit);
+    }
+  }
+
+  const skillTokens = message.match(/(?:^|\s)\/([a-z0-9][a-z0-9-]*)/g) || [];
+  const all = await listAllSkills();
+  const flat = all.scopes.flatMap((sc) => sc.skills.map((s) => ({ ...s, _scope: sc.scope })));
+  for (const raw of skillTokens) {
+    const name = raw.trim().slice(1);
+    const hit = flat.find((s) => s.id === name || s.name === name);
+    if (hit && !usedSkills.has(hit.id)) {
+      usedSkills.add(hit.id);
+      refs.skills.push({ id: hit.id, name: hit.name, scope: hit._scope, content: hit.content });
+    }
+  }
+  return refs;
+}
+
+function referencesBlock(refs) {
+  let out = "";
+  if (refs.cards.length) {
+    out += "\n\nREFERENCED CARDS (full records — the user is pointing at these):\n" +
+      JSON.stringify(refs.cards.map((c) => {
+        const ev = store.CORE.evaluate(c);
+        return { ...c, computedVerdict: ev && ev.key, computedS: c.rho != null ? +store.CORE.scoreOf(c).toFixed(3) : undefined };
+      }), null, 1);
+  }
+  if (refs.skills.length) {
+    out += "\n\nINVOKED SKILLS — the user invoked these explicitly; their instructions are binding for this turn:\n" +
+      refs.skills.map((s) => "--- " + s.id + " (" + s.scope + ") ---\n" + s.content).join("\n\n");
+  }
+  return out;
+}
+
 async function agentState() {
   const s = store.CORE.compactState(store.data);
   const { skills } = await listSkills();
@@ -392,10 +450,19 @@ async function agentState() {
   return s;
 }
 
-// execute the validated plan on the canonical store via the shared core
-async function executePlan(validated) {
+// execute the validated plan on the canonical store via the shared core.
+// dryRun: explain/read-only invocations — actions are reported as suggestions,
+// never applied (nothing mutates when the user only asked "explain").
+async function executePlan(validated, opts) {
+  const dryRun = !!(opts && opts.dryRun);
   const results = [];
   let changed = false;
+  if (dryRun) {
+    validated.actions.forEach((a) => {
+      results.push({ action: a.action, ok: true, message: "suggested — not executed (read-only)" });
+    });
+    return { ...validated, results, version: store.data.version, dryRun: true };
+  }
   for (const a of validated.actions) {
     if (a.action === "run_function") {
       try {
@@ -408,13 +475,17 @@ async function executePlan(validated) {
             if (r.ok) changed = true;
           }
         }
+        log.info("function.run", { name: a.name, ok: true });
         results.push({ action: "run_function", ok: true, message: (out.message || a.name + " done") + (sub.length ? " [" + sub.join("; ") + "]" : "") });
       } catch (e) {
+        log.warn("function.run.failed", { name: a.name, error: String((e && e.message) || e).slice(0, 200) });
         results.push({ action: "run_function", ok: false, message: String((e && e.message) || e) });
       }
       continue;
     }
     const r = store.CORE.applyAction(store.data, Object.assign({ via: "the Kimi agent" }, a));
+    if (!r.ok) log.warn("action.refused", { action: a.action, id: a.id, reason: (r.message || "").slice(0, 160) });
+    else log.debug("action.ok", { action: a.action, id: a.id });
     results.push({ action: a.action, ok: r.ok, message: r.message });
     if (r.ok) changed = true;
   }
@@ -422,7 +493,9 @@ async function executePlan(validated) {
   return { ...validated, results, version: store.data.version };
 }
 
-async function produce(message, _clientState, onProgress, cancelReg) {
+async function produce(message, _clientState, onProgress, cancelReg, opts) {
+  const refs = await expandReferences(message);
+  const refsOut = { skills: refs.skills.map((s) => s.id), cards: refs.cards.map((c) => c.id) };
   if (MOCK) {
     if (onProgress) onProgress("mock backend: generating canned plan…");
     await new Promise((r) => setTimeout(r, parseInt(process.env.QPT_MOCK_DELAY_MS || "500", 10)));
@@ -435,14 +508,25 @@ async function produce(message, _clientState, onProgress, cancelReg) {
         note: "Created by the mock agent path (QPT_AGENT_MOCK=1).",
       }],
       warnings: [],
-    });
+      refs: refsOut,
+    }, opts);
   }
-  const text = await runAgent(message, await agentState(), onProgress, null, cancelReg);
+  const t0 = Date.now();
+  const text = await runAgent(message + referencesBlock(refs), await agentState(), onProgress, null, cancelReg);
   const plan = extractJson(text);
   const validated = plan
     ? validatePlan(plan)
     : { reply: "The agent did not return a parseable plan. Raw reply: " + text.slice(0, 1500), actions: [], warnings: ["unparseable plan"] };
-  return executePlan(validated);
+  validated.refs = refsOut;
+  log.info("agent.turn", {
+    ms: Date.now() - t0,
+    msgBytes: message.length,
+    actions: validated.actions.length,
+    refs: (refsOut.skills.length + refsOut.cards.length) || undefined,
+    parsed: !!plan,
+  });
+  if (!plan) log.warn("agent.plan.unparseable", { tail: text.slice(-200) });
+  return executePlan(validated, opts);
 }
 
 /* ---------------------------------------------------------- job handlers */
@@ -463,7 +547,7 @@ function waitJob(job, timeoutMs) {
 }
 
 registerHandler("agent", async (job) =>
-  produce(job.payload.message, null, (d) => note(job, d), (fn) => { job._cancel = fn; }));
+  produce(job.payload.message, null, (d) => note(job, d), (fn) => { job._cancel = fn; }, { dryRun: !!job.payload.readOnly }));
 
 registerHandler("generate", async (job) => {
   const hint = job.payload.hint;
@@ -511,7 +595,7 @@ async function handleAgent(req, res, url) {
   if (!message) return sendJson(res, 400, { error: "message required" });
   const stream = url.searchParams.get("stream") === "1";
 
-  const job = submitJob("agent", { message });
+  const job = submitJob("agent", { message, readOnly: !!parsed.readOnly });
 
   if (stream) {
     res.writeHead(200, {
@@ -553,7 +637,13 @@ async function handleAgent(req, res, url) {
 }
 
 const server = http.createServer(async (req, res) => {
+  const t0 = Date.now();
   const url = new URL(req.url, "http://x");
+  const end = res.end.bind(res);
+  res.end = (...a) => {
+    log.debug("http", { m: req.method, p: url.pathname, s: res.statusCode, ms: Date.now() - t0 });
+    return end(...a);
+  };
   if (req.method === "OPTIONS") return sendJson(res, 204, {});
   if (url.pathname === "/api/health") {
     return sendJson(res, 200, { ok: true, mock: MOCK, backend: MOCK ? "mock" : await detectBackend(), executable: EXE, model: currentModel, storeVersion: store.data.version });
@@ -581,6 +671,7 @@ const server = http.createServer(async (req, res) => {
     }
     currentModel = wanted; // null → CLI default
     sessionPromise = null; // rebuild the SDK session with the new model
+    log.info("model.set", { model: currentModel || "default" });
     return sendJson(res, 200, { current: currentModel || cfg.defaultModel });
   }
 
@@ -623,6 +714,7 @@ const server = http.createServer(async (req, res) => {
     try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "invalid JSON body" }); }
     const command = typeof parsed.command === "string" ? parsed.command : "";
     const r = await execCommand(command, store);
+    log.info("cli", { cmd: command.slice(0, 120), ok: r.ok, changed: r.changed || undefined });
     return sendJson(res, r.ok ? 200 : 400, { ok: r.ok, output: r.output, changed: r.changed, version: store.data.version });
   }
 
@@ -704,10 +796,12 @@ const server = http.createServer(async (req, res) => {
     try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "invalid JSON body" }); }
     try {
       const name = await settings.setKey(parsed.name, parsed.value);
+      log.info("keys.set", { name });
       return sendJson(res, 200, { name, keys: settings.maskedKeys() });
     } catch (e) { return sendJson(res, 400, { error: String((e && e.message) || e) }); }
   }
   if (url.pathname === "/api/keys" && req.method === "DELETE") {
+    log.info("keys.delete", { name: url.searchParams.get("name") || "" });
     await settings.deleteKey(url.searchParams.get("name") || "");
     return sendJson(res, 200, { keys: settings.maskedKeys() });
   }
@@ -722,11 +816,13 @@ const server = http.createServer(async (req, res) => {
     try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "invalid JSON body" }); }
     try {
       const name = await settings.setMcpServer(parsed.name, parsed.entry || parsed);
+      log.info("mcp.set", { name, type: (settings.cfg.mcpServers[name] || {}).command ? "stdio" : "http" });
       return sendJson(res, 200, { name, mcpServers: settings.cfg.mcpServers });
     } catch (e) { return sendJson(res, 400, { error: String((e && e.message) || e) }); }
   }
   if (url.pathname === "/api/mcp" && req.method === "DELETE") {
     try {
+      log.info("mcp.delete", { name: url.searchParams.get("name") || "" });
       await settings.deleteMcpServer(url.searchParams.get("name") || "");
       return sendJson(res, 200, { mcpServers: settings.cfg.mcpServers });
     } catch (e) { return sendJson(res, 400, { error: String((e && e.message) || e) }); }
@@ -831,9 +927,11 @@ const server = http.createServer(async (req, res) => {
       if (parsed.id) {
         // update (name, description, content, and spec optional fields)
         const skill = await updateSkill(parsed.id, parsed);
+        log.info("skill.update", { id: parsed.id });
         return sendJson(res, 200, { skill });
       }
       const skill = await createSkill(parsed);
+      log.info("skill.create", { id: skill.id });
       return sendJson(res, 200, { skill });
     } catch (e) {
       const msg = String((e && e.message) || e);
@@ -844,6 +942,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/api/skills" && req.method === "DELETE") {
     try {
       const id = await deleteSkill(url.searchParams.get("id"));
+      log.info("skill.delete", { id });
       return sendJson(res, 200, { deleted: id });
     } catch (e) {
       return sendJson(res, 404, { error: "no skill " + url.searchParams.get("id") });
@@ -859,7 +958,10 @@ const server = http.createServer(async (req, res) => {
   if (!file.startsWith(__dirname)) { res.writeHead(403); return res.end("forbidden"); }
   try {
     const data = await readFile(file);
-    res.writeHead(200, { "content-type": MIME[path.extname(file)] || "application/octet-stream" });
+    const ext = path.extname(file);
+    // no heuristic caching — the app ships source files that change between restarts
+    const cache = [".html", ".js", ".css", ".md", ".json"].includes(ext) ? "no-cache" : "public, max-age=3600";
+    res.writeHead(200, { "content-type": MIME[ext] || "application/octet-stream", "cache-control": cache });
     res.end(data);
   } catch {
     res.writeHead(404); res.end("not found");
@@ -868,4 +970,13 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`QPT Workbench → http://localhost:${PORT}  (agent bridge ${MOCK ? "MOCK" : "kimi CLI"})`);
+  log.info("server.start", {
+    port: PORT,
+    mock: MOCK || undefined,
+    model: currentModel || "default",
+    storeVersion: store.data.version,
+    cards: Object.keys(store.data.cards).length,
+    logLevel: process.env.LOG_LEVEL || "info",
+  });
+  detectBackend(); // resolves (and logs) sdk vs compat at startup rather than first turn
 });

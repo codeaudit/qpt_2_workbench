@@ -70,6 +70,20 @@ the full browser → server → board pipeline without a CLI or quota.
 | `KIMI_EXECUTABLE` | `kimi` | path/name of the CLI binary |
 | `KIMI_MODEL` | CLI default | model alias for agent turns |
 | `QPT_AGENT_MOCK` | — | `1` = canned responses, no CLI needed |
+| `LOG_LEVEL` | `info` | `debug` · `info` · `warn` · `error` |
+
+### Logging
+
+Every significant server event is logged — startup (`server.start`, `agent.backend`),
+HTTP access lines (`http` with method/path/status/ms), job lifecycle
+(`job.submit/start/end/error/cancel` with queue-wait and run durations), agent turns
+(`agent.turn` with ms, actions, refs), CLI spawns (`agent.spawn` at debug), action
+refusals (`action.refused` with the rule that fired), CLI commands (`cli`), store
+saves (`store.save`/`store.reset`), and all settings/skill/model/MCP mutations.
+
+Two sinks: the console, and `data/server.log` (gitignored, rotated to `.1` at ~1 MB).
+`LOG_LEVEL=debug npm start` for full detail; prompt bodies and secrets are never logged
+— sizes and ids only.
 
 ### Troubleshooting
 
@@ -125,6 +139,9 @@ Promotion — the meta-workflow between boards, from a card's detail view:
 ## Interacting
 
 - **Drag & drop** between columns (or the `‹ ›` buttons); refusals explain themselves
+- **Bento layout** (`▦ bento` toggle in the context strip) — columns become grid tiles:
+  drag a tile by its header to reorder, double-click a header to toggle 1×/2× width
+  (the Gate starts wide). Order and spans persist per board, per device
 - **Click a card** for the full view: gate evaluation, editable trajectory matrix,
   domain-clamped metric sliders, pathology/death pickers, naming classification (§12),
   the trace, registry links, promotion actions
@@ -167,6 +184,28 @@ The browser adopts the store state after each turn.
 by one `result` line. The chat panel renders them as a live `⏳ Ns · activity` bubble, and
 Send is disabled while a turn is in flight. Plain `POST /api/agent` (no `stream`) still
 returns one-shot JSON.
+
+**References and autocomplete.** The chat input autocompletes as you type: `/` offers every
+skill on the system (all scopes, prefix-filtered, arrows + Enter/Tab/click to pick), and
+`@` offers cards by title, id, or **handle**. Every card carries a stable **CamelCase
+handle** (`@OnboardingDropOff`) — assigned once at creation from its title (stop-words
+stripped, 5 words max, deduped `SameTitle2`, `…3`), never re-derived on rename, and shown
+as a chip on the card, in the CLI, and in the agent's compact state. Handles are what
+references resolve through — server-side, `@Handle` (or `@id`/`@title`, all still valid)
+injects the card's full record (trace included) with its computed verdict and S, and
+`/skill` injects that skill's complete SKILL.md as binding instructions for the turn
+(exactly what a skill invocation means). The result carries `refs: {skills, cards}` and
+the chat shows a `↳ context resolved:` line so you can see exactly what context the agent
+worked from.
+
+**Per-card explanations.** Every card has a **✦ button**: it opens the card's detail view
+and streams an agent explanation into it — what the card is, its state (verdict, S vs θ,
+trajectory, zone), *why* the gate says so, and the single most honest next action, written
+in an intuitive way with examples or analogies when needed ("a form nobody requested,
+already filled in and filed"). These invocations run with `readOnly: true` (**dryRun** on
+the server): any actions the plan contains come back marked `suggested — not executed
+(read-only)` and the store is untouched — the agent explains, it never acts. Regenerate
+anytime with ↻.
 
 Action vocabulary: `set_board`, `create_card`, `move_card`, `edit_card` (domain-clamped
 patch), `promote_card`, `evaluate_card`.
@@ -346,6 +385,7 @@ server.js       static hosting + /api/agent bridge + state/cli/skills routes
 server-jobs.js  FIFO agentic job queue: submit, progress, cancel, history
 server-settings.js  workbench config: masked keys, prompt override, MCP sync
 server-functions.js user-function engine (data/functions/*.js)
+server-log.js   leveled logging → console + data/server.log (rotated)
 server-store.js canonical card store (data/store.json), seeded from the spec
 server-skills.js skills on disk — Agent Skills format (data/skills/*/SKILL.md)
 cli-exec.js     command language executor (shared by HTTP and the bin)

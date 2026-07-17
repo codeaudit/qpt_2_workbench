@@ -8,6 +8,7 @@ import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createSkill } from "./server-skills.js";
+import { log } from "./server-log.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -47,6 +48,9 @@ export async function openStore() {
     await persist();
   }
 
+  // CamelCase handle migration: assign stable handles to cards that predate them
+  if (CORE.ensureHandles(data.cards)) await persist();
+
   async function persist() {
     await mkdir(path.dirname(file), { recursive: true });
     const tmp = file + ".tmp";
@@ -62,12 +66,14 @@ export async function openStore() {
     // persist with a version bump — call after every mutation
     async save() {
       data.version = (data.version || 0) + 1;
+      log.debug("store.save", { version: data.version, cards: Object.keys(data.cards).length });
       await persist();
     },
     async reset() {
       data.boardId = "protocol";
       data.cards = CORE.seedCards();
       data.customSeq = 0;
+      log.info("store.reset", {});
       await this.save();
     },
   };

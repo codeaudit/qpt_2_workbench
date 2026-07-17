@@ -26,6 +26,31 @@
   let pendingMove = null; // { id, colId } awaiting a semantically required edit
   let sim = { active: false, idx: -1, timer: null, snapshot: null, quiet: false, playing: false };
 
+  // layout prefs (device-local): kanban row ⇄ bento grid, tile order + spans
+  const PREFS_KEY = "qpt-ui-prefs";
+  let prefs = { mode: "kanban", order: {}, spans: {} };
+  try {
+    const p = JSON.parse(localStorage.getItem(PREFS_KEY));
+    if (p && typeof p === "object") prefs = Object.assign(prefs, p);
+  } catch (e) {}
+  function savePrefs() {
+    try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (e) {}
+  }
+  function orderedColumns(board) {
+    const saved = prefs.order[board.id] || [];
+    const cols = board.columns.slice();
+    cols.sort((a, b) => {
+      const ia = saved.indexOf(a.id), ib = saved.indexOf(b.id);
+      return (ia < 0 ? 999 + board.columns.indexOf(a) : ia) - (ib < 0 ? 999 + board.columns.indexOf(b) : ib);
+    });
+    return cols;
+  }
+  function spanOf(board, colId) {
+    const s = (prefs.spans[board.id] || {})[colId];
+    if (s) return s;
+    return board.id === "protocol" && colId === "gate" ? 2 : 1; // the gate earns a wide tile
+  }
+
   /* ------------------------------------------------------------- state */
 
   function clone(obj) { return JSON.parse(JSON.stringify(obj)); }
@@ -46,6 +71,8 @@
       const m = /^custom-(\d+)$/.exec(id);
       return m ? Math.max(n, parseInt(m[1], 10) + 1) : n;
     }, 0);
+    // CamelCase handle migration for cards that predate handles
+    if (CORE.ensureHandles(state.cards)) saveStoreLocal();
   }
 
   function loadStore() {
@@ -295,14 +322,28 @@
     [["living", "Living"], ["delusion", "Beautiful delusion"], ["competent", "Competent-dead"], ["dead", "Fully dead"]]
       .forEach(([k, label]) => legend.appendChild(el("span", "chip verdict " + k, label)));
     $ctx.appendChild(legend);
+    const tog = el("button", "layout-toggle" + (prefs.mode === "bento" ? " active" : ""),
+      prefs.mode === "bento" ? "▤ kanban" : "▦ bento");
+    tog.title = prefs.mode === "bento"
+      ? "Back to the kanban row"
+      : "Bento grid — drag tiles to reorder, double-click a tile header to resize";
+    tog.addEventListener("click", () => {
+      prefs.mode = prefs.mode === "bento" ? "kanban" : "bento";
+      savePrefs();
+      renderAll();
+      if (prefs.mode === "bento") notice("Bento layout — drag tiles by their headers to reorder, double-click a header to resize.");
+    });
+    $ctx.appendChild(tog);
   }
 
   function renderBoard() {
     const b = currentBoard();
     const w = weights();
     $board.innerHTML = "";
-    b.columns.forEach((col) => {
-      const colEl = el("section", "column cat-" + col.cat);
+    $board.classList.toggle("bento", prefs.mode === "bento");
+    orderedColumns(b).forEach((col) => {
+      const span = prefs.mode === "bento" ? spanOf(b, col.id) : 1;
+      const colEl = el("section", "column cat-" + col.cat + (span === 2 ? " span-2" : ""));
       colEl.dataset.column = col.id;
 
       const head = el("header", "col-head");
@@ -311,6 +352,23 @@
       titleWrap.appendChild(el("span", "col-name", col.name));
       titleWrap.appendChild(el("span", "col-step", col.step));
       head.appendChild(titleWrap);
+      if (prefs.mode === "bento") {
+        head.appendChild(el("span", "span-hint", span === 2 ? "2× · drag · dbl-click" : "1× · drag · dbl-click"));
+        head.draggable = true;
+        head.addEventListener("dragstart", (ev) => {
+          ev.dataTransfer.setData("text/plain", "col:" + col.id);
+          ev.dataTransfer.effectAllowed = "move";
+          colEl.classList.add("tile-dragging");
+        });
+        head.addEventListener("dragend", () => colEl.classList.remove("tile-dragging"));
+        head.addEventListener("dblclick", () => {
+          prefs.spans[b.id] = prefs.spans[b.id] || {};
+          const cur = spanOf(b, col.id);
+          prefs.spans[b.id][col.id] = cur === 2 ? 1 : 2;
+          savePrefs();
+          renderBoard();
+        });
+      }
       const count = el("span", "col-count");
       head.appendChild(count);
       colEl.appendChild(head);
@@ -338,12 +396,29 @@
       colEl.addEventListener("dragover", (ev) => {
         ev.preventDefault();
         colEl.classList.add("drop-target");
+        if (prefs.mode === "bento") colEl.classList.add("tile-drop-target");
       });
-      colEl.addEventListener("dragleave", () => colEl.classList.remove("drop-target"));
+      colEl.addEventListener("dragleave", () => {
+        colEl.classList.remove("drop-target");
+        colEl.classList.remove("tile-drop-target");
+      });
       colEl.addEventListener("drop", (ev) => {
         ev.preventDefault();
         colEl.classList.remove("drop-target");
-        moveCard(ev.dataTransfer.getData("text/plain"), col.id);
+        colEl.classList.remove("tile-drop-target");
+        const data = ev.dataTransfer.getData("text/plain");
+        if (data.indexOf("col:") === 0) {
+          // tile reorder (bento): insert the dragged tile at this tile's position
+          const draggedId = data.slice(4);
+          if (draggedId === col.id) return;
+          const order = orderedColumns(b).map((c) => c.id).filter((id) => id !== draggedId);
+          order.splice(order.indexOf(col.id), 0, draggedId);
+          prefs.order[b.id] = order;
+          savePrefs();
+          renderBoard();
+          return;
+        }
+        moveCard(data, col.id);
       });
 
       $board.appendChild(colEl);
@@ -358,6 +433,7 @@
 
     const top = el("div", "card-top");
     top.appendChild(el("span", "sign chip", c.sign));
+    if (c.handle) top.appendChild(el("span", "chip handle", "@" + c.handle));
     if (c.scale) top.appendChild(el("span", "chip scale", c.scale));
     if (c.cycle) top.appendChild(el("span", "chip cycle", "↻ " + c.cycle));
     card.appendChild(top);
@@ -410,6 +486,13 @@
     const actions = el("div", "card-actions");
     const cols = currentBoard().columns;
     const idx = cols.findIndex((x) => x.id === c.column);
+    const agentBtn = el("button", "move-btn card-agent-btn", "✦");
+    agentBtn.title = "Explain this card with the agent";
+    agentBtn.addEventListener("click", (ev2) => {
+      ev2.stopPropagation();
+      explainCard(c.id);
+    });
+    actions.appendChild(agentBtn);
     if (idx > 0) actions.appendChild(moveBtn("‹", c.id, cols[idx - 1].id));
     if (idx < cols.length - 1) actions.appendChild(moveBtn("›", c.id, cols[idx + 1].id));
     if (c.column === "closure" && state.boardId === "protocol") {
@@ -526,12 +609,107 @@
       const card = buildCard(board.id, id, fields);
       if (!card) return;
       state.cards[id] = card;
+      CORE.ensureHandles(state.cards);
       pushTrace(card, { action: "enters the workflow", from: "—",
         to: colName(board.id, firstCol), note: "created at the entry point" });
       saveStore();
       renderAll();
     });
     return form;
+  }
+
+  /* ------------------------------------------ per-card agent explanation */
+
+  const explainCache = {}; // cardId → { status, activity, text, suggestions }
+
+  function renderExplain(c) {
+    const sec = el("div", "m-section m-explain");
+    sec.appendChild(el("h4", null, "✦ Agent explanation"));
+    const cur = explainCache[c.id];
+    if (cur && cur.status === "running") {
+      sec.appendChild(el("p", "explain-text dim", "⏳ " + (cur.activity || "…")));
+      return sec;
+    }
+    if (cur && cur.status === "done") {
+      sec.appendChild(el("p", "explain-text", cur.text));
+      (cur.suggestions || []).forEach((s) => {
+        sec.appendChild(el("p", "explain-suggestion", "suggested: " + s.action + " — " + s.message));
+      });
+      const regen = el("button", "move-btn regen-btn", "↻ regenerate");
+      regen.addEventListener("click", () => runExplain(c));
+      sec.appendChild(regen);
+      return sec;
+    }
+    const b = el("button", "move-btn regen-btn", "✦ explain this card");
+    b.addEventListener("click", () => runExplain(c));
+    sec.appendChild(b);
+    return sec;
+  }
+
+  function updateExplainActivity(c) {
+    const node = viewEl && viewEl.querySelector(".m-explain .explain-text");
+    if (node) node.textContent = "⏳ " + (explainCache[c.id].activity || "…");
+  }
+
+  function explainCard(id) {
+    openModal(id);
+    runExplain(state.cards[id]);
+  }
+
+  // read-only invocation: the agent explains; nothing executes (server dryRun)
+  async function runExplain(c) {
+    if (!c) return;
+    if (!remote.connected) {
+      explainCache[c.id] = { status: "done", text: "Explanations need the agent bridge — start it with npm start." };
+      if (openCardId === c.id) refreshView(c);
+      return;
+    }
+    explainCache[c.id] = { status: "running", activity: "contacting the agent…", text: "" };
+    if (openCardId === c.id) refreshView(c);
+    const msg =
+      "Explain card @" + c.id + " to a practitioner, in under 200 words: what it is; " +
+      "its current state (verdict, S vs θ, trajectory, zone); WHY the gate evaluates it that way " +
+      "(which conjuncts hold or fail — cite sections); and the single most honest next action " +
+      "under the rules. Write it in an intuitive way, with examples or analogies when needed — " +
+      "the reader should *feel* what the gate is doing, not just parse the notation. " +
+      "Plain text. Take no board actions — actions must be [].";
+    try {
+      const res = await fetch(AGENT_URL + "/api/agent?stream=1", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: msg, readOnly: true }),
+      });
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "", result = null, errObj = null;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          if (!line.trim()) continue;
+          let ev;
+          try { ev = JSON.parse(line); } catch { continue; }
+          if (ev.type === "progress") {
+            explainCache[c.id].activity = ev.detail;
+            if (openCardId === c.id) updateExplainActivity(c);
+          } else if (ev.type === "result") result = ev;
+          else if (ev.type === "error") errObj = ev;
+        }
+      }
+      if (errObj) throw new Error(errObj.error);
+      explainCache[c.id] = {
+        status: "done",
+        text: (result && result.reply) || "(no explanation returned)",
+        suggestions: (result && result.results) || [],
+      };
+    } catch (e) {
+      explainCache[c.id] = { status: "done", text: "✗ " + (e && e.message ? e.message : "explanation failed") };
+    }
+    if (openCardId === c.id) refreshView(c);
   }
 
   /* -------------------------------------------------------------- modal */
@@ -574,7 +752,7 @@
     head.appendChild(el("span", "sign chip big", c.sign));
     const hw = el("div");
     hw.appendChild(el("h2", "m-title", c.title));
-    if (c.signName) hw.appendChild(el("div", "m-sub", c.signName));
+    if (c.signName) hw.appendChild(el("div", "m-sub", c.signName + (c.handle ? "  ·  @" + c.handle : "")));
     head.appendChild(hw);
     viewEl.appendChild(head);
 
@@ -602,6 +780,7 @@
 
     const ev = evaluate(c);
     if (ev) viewEl.appendChild(renderGateView(c, ev));
+    viewEl.appendChild(renderExplain(c));
     if (c.reliability != null || c.kind === "note") viewEl.appendChild(renderDialecticView(c));
     viewEl.appendChild(renderPathologyPicker(c));
     viewEl.appendChild(renderDeathPicker(c));
@@ -1535,6 +1714,95 @@
     return d;
   }
 
+  /* ---- autocomplete: "/" skills (all scopes), "@" cards (by title, handle, or id) ---- */
+
+  let acSkills = null; // lazy-loaded on first "/"
+
+  function attachAutocomplete(input, form) {
+    const acBox = el("div", "autocomplete hidden");
+    form.appendChild(acBox);
+    let acIndex = -1;
+
+    function currentToken() {
+      const pos = input.selectionStart;
+      const before = input.value.slice(0, pos);
+      const m = /(^|\s)([/][\w-]*|[@][\w-]*)$/.exec(before);
+      return m ? { token: m[2], start: pos - m[2].length } : null;
+    }
+
+    async function acItems(trigger, prefix) {
+      if (trigger === "@") {
+        return Object.values(state.cards)
+          .filter((c) => (c.title || "").toLowerCase().includes(prefix) ||
+            (c.handle || "").toLowerCase().includes(prefix) || c.id.toLowerCase().includes(prefix))
+          .slice(0, 8)
+          .map((c) => ({ label: c.title, hint: "@" + (c.handle || c.id) + " · " + c.column, insert: "@" + (c.handle || c.id) }));
+      }
+      if (!acSkills) {
+        try {
+          const all = await (await fetch(AGENT_URL + "/api/skills/all")).json();
+          acSkills = all.scopes.flatMap((sc) => sc.skills.map((s) => ({ label: s.id, hint: sc.scope, insert: "/" + s.id })));
+        } catch { acSkills = []; }
+      }
+      return acSkills.filter((s) => s.label.includes(prefix)).slice(0, 8);
+    }
+
+    function acHide() { acBox.classList.add("hidden"); acIndex = -1; }
+
+    async function acShow() {
+      const t = currentToken();
+      if (!t || (t.token[0] !== "/" && t.token[0] !== "@")) { acHide(); return; }
+      const prefix = t.token.slice(1).toLowerCase();
+      const items = await acItems(t.token[0], prefix);
+      if (!items.length) { acHide(); return; }
+      acBox.innerHTML = "";
+      items.forEach((it, i) => {
+        const row = el("div", "ac-row" + (i === acIndex ? " active" : ""));
+        row.appendChild(el("span", "ac-label", (t.token[0] === "/" ? "/" : "") + it.label));
+        row.appendChild(el("span", "ac-hint", it.hint));
+        row.addEventListener("mousedown", (ev) => { ev.preventDefault(); acPick(t, it); });
+        row.dataset.index = i;
+        acBox.appendChild(row);
+      });
+      acBox._items = items;
+      acBox._token = t;
+      acBox.classList.remove("hidden");
+    }
+
+    function acPick(t, it) {
+      const before = input.value.slice(0, t.start);
+      const after = input.value.slice(input.selectionStart);
+      input.value = before + it.insert + " " + after;
+      input.selectionStart = input.selectionEnd = (before + it.insert + " ").length;
+      acHide();
+      input.focus();
+    }
+
+    input.addEventListener("input", () => { acIndex = -1; acShow(); });
+    input.addEventListener("keydown", (ev) => {
+      if (acBox.classList.contains("hidden")) return;
+      const items = acBox._items || [];
+      if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+        ev.preventDefault();
+        acIndex = (acIndex + (ev.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+        acBox.querySelectorAll(".ac-row").forEach((r) => r.classList.toggle("active", +r.dataset.index === acIndex));
+      } else if ((ev.key === "Enter" || ev.key === "Tab") && acIndex >= 0 && items[acIndex]) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        acPick(acBox._token, items[acIndex]);
+      } else if (ev.key === "Escape") {
+        acHide();
+        ev.stopPropagation();
+      }
+    });
+    input.addEventListener("blur", () => setTimeout(acHide, 150));
+  }
+
+  const agentInput = document.getElementById("agent-input");
+  const cliInput = document.getElementById("cli-input");
+  attachAutocomplete(agentInput, document.getElementById("agent-form"));
+  attachAutocomplete(cliInput, document.getElementById("cli-form"));
+
   async function agentSend(message) {
     agentSay("user", message);
     const sendBtn = document.querySelector("#agent-form button");
@@ -1585,6 +1853,14 @@
         return;
       }
       if (result.reply) agentSay("agent", result.reply);
+      if (result.refs && (result.refs.skills.length || result.refs.cards.length)) {
+        agentSay("cli", "↳ context resolved: " +
+          result.refs.skills.map((s) => "/" + s)
+            .concat(result.refs.cards.map((id) => {
+              const cc = state.cards[id];
+              return "@" + ((cc && cc.handle) || id);
+            })).join(" · "));
+      }
       (result.warnings || []).forEach((w) => agentSay("warn", "⚠ " + w));
       if (remote.connected && result.results) {
         // actions already executed on the server store — show results and adopt state

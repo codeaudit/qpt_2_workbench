@@ -1495,3 +1495,160 @@ html[data-theme="light"] {
 .prompt-edit { font-family: var(--mono); font-size: 11px; line-height: 1.5; }
 .in.mono { font-family: var(--mono); }
 textarea.in.mono { font-family: var(--mono); font-size: 11px; }
+
+/* --------------------------------------------------------- bento layout */
+
+#board.bento {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(272px, 1fr));
+  grid-auto-flow: dense;
+  gap: 14px;
+  align-items: start;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+#board.bento .column {
+  max-height: calc(100vh - 210px);
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+  transition: transform 0.16s ease, box-shadow 0.16s ease, grid-column 0.2s ease;
+  position: relative;
+}
+html[data-theme="light"] #board.bento .column {
+  box-shadow: 0 2px 10px rgba(29, 34, 49, 0.10);
+}
+
+#board.bento .column:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3);
+}
+html[data-theme="light"] #board.bento .column:hover {
+  box-shadow: 0 10px 28px rgba(29, 34, 49, 0.16);
+}
+
+#board.bento .column.span-2 { grid-column: span 2; }
+
+@media (max-width: 640px) {
+  #board.bento .column.span-2 { grid-column: span 1; }
+}
+
+/* tile drag affordances */
+#board.bento .col-head {
+  cursor: grab;
+  user-select: none;
+}
+#board.bento .column.tile-dragging {
+  opacity: 0.4;
+  transform: scale(0.98);
+}
+#board.bento .column.tile-drop-target {
+  border-color: var(--third);
+  box-shadow: 0 0 0 2px var(--third), 0 10px 28px rgba(0, 0, 0, 0.3);
+}
+
+/* span hint chip on hover */
+#board.bento .col-head .span-hint {
+  opacity: 0;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--ink-dim);
+  transition: opacity 0.15s;
+}
+#board.bento .column:hover .col-head .span-hint { opacity: 1; }
+
+/* layout toggle in the context strip */
+.layout-toggle {
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
+  border-radius: 5px;
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.layout-toggle:hover { color: var(--ink); border-color: var(--third); }
+.layout-toggle.active { color: var(--third); border-color: var(--third); }
+
+/* ---------------------------------------------------------- autocomplete */
+
+#agent-form, #cli-form { position: relative; }
+
+.autocomplete {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 14px;
+  right: 14px;
+  background: var(--bg-panel);
+  border: 1px solid var(--third);
+  border-radius: 8px;
+  box-shadow: 0 -6px 24px var(--shadow);
+  max-height: 240px;
+  overflow-y: auto;
+  z-index: 55;
+}
+.autocomplete.hidden { display: none; }
+
+.ac-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.ac-row:hover, .ac-row.active { background: var(--bg-card-hover); }
+
+.ac-label {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink);
+  flex: 0 1 55%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ac-hint {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-dim);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
+}
+
+/* ------------------------------------------------- card agent explain */
+
+.card-agent-btn { color: var(--third); border-color: var(--third); }
+.card-agent-btn:hover { background: rgba(165, 138, 224, 0.12); }
+
+.m-explain .explain-text {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink);
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+}
+.m-explain .explain-text.dim { color: var(--ink-dim); font-family: var(--mono); font-size: 11px; }
+
+.explain-suggestion {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--first);
+  margin: 0 0 4px;
+}
+
+.regen-btn { color: var(--third); border-color: var(--third); }
+
+/* card handles */
+
+.chip.handle {
+  color: var(--second);
+  border-color: var(--line);
+  font-size: 9.5px;
+  opacity: 0.85;
+}

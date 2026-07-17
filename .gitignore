@@ -1,3 +1,4 @@
 node_modules/
 data/store.json
 data/config.json
+data/server.log*

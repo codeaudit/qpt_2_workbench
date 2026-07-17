@@ -98,12 +98,12 @@ export async function execCommand(line, store) {
       if (!list.length) return ok("(no cards on " + boardId + ")");
       return ok(list.map((c) => {
         const ev = CORE.evaluate(c);
-        return c.id + " @ " + c.column + " — " + c.title + (ev ? "  [" + ev.key + "]" : "");
+        return c.id + (c.handle ? " @" + c.handle : "") + " @ " + c.column + " — " + c.title + (ev ? "  [" + ev.key + "]" : "");
       }).join("\n"));
     }
 
     case "card": {
-      const c = data.cards[pos[0]];
+      const c = CORE.findCard(data.cards, pos[0]);
       if (!c) return bad("no card " + (pos[0] || "(missing id)"));
       return ok(JSON.stringify(c, null, 1));
     }
@@ -122,12 +122,17 @@ export async function execCommand(line, store) {
         via: "the CLI",
       }));
 
-    case "move":
-      if (!pos[0] || !pos[1]) return bad("usage: move <id> <column>");
-      return finish(CORE.applyAction(data, { action: "move_card", id: pos[0], column: pos[1] }));
+    case "move": {
+      if (!pos[0] || !pos[1]) return bad("usage: move <id|@handle> <column>");
+      const c = CORE.findCard(data.cards, pos[0]);
+      if (!c) return bad("no card " + pos[0]);
+      return finish(CORE.applyAction(data, { action: "move_card", id: c.id, column: pos[1] }));
+    }
 
     case "edit": {
-      if (!pos[0]) return bad("usage: edit <id> key=value …");
+      if (!pos[0]) return bad("usage: edit <id|@handle> key=value …");
+      const c = CORE.findCard(data.cards, pos[0]);
+      if (!c) return bad("no card " + pos[0]);
       const patch = {};
       for (const kv of pos.slice(1)) {
         const eq = kv.indexOf("=");
@@ -140,17 +145,22 @@ export async function execCommand(line, store) {
         else if (v.indexOf(",") >= 0) v = v.split(",").map((x) => x.trim()).filter(Boolean);
         patch[kv.slice(0, eq)] = v;
       }
-      return finish(CORE.applyAction(data, { action: "edit_card", id: pos[0], patch }));
+      return finish(CORE.applyAction(data, { action: "edit_card", id: c.id, patch }));
     }
 
     case "evaluate": {
-      const r = CORE.applyAction(data, { action: "evaluate_card", id: pos[0] });
+      const c = CORE.findCard(data.cards, pos[0]);
+      if (!c) return bad("no card " + (pos[0] || "(missing id)"));
+      const r = CORE.applyAction(data, { action: "evaluate_card", id: c.id });
       return r.ok ? ok(r.message) : bad(r.message);
     }
 
-    case "promote":
-      if (!pos[0] || !flags.to) return bad("usage: promote <id> --to <board>");
-      return finish(CORE.applyAction(data, { action: "promote_card", id: pos[0], board: flags.to }));
+    case "promote": {
+      if (!pos[0] || !flags.to) return bad("usage: promote <id|@handle> --to <board>");
+      const c = CORE.findCard(data.cards, pos[0]);
+      if (!c) return bad("no card " + pos[0]);
+      return finish(CORE.applyAction(data, { action: "promote_card", id: c.id, board: flags.to }));
+    }
 
     case "reset":
       await store.reset();
