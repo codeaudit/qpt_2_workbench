@@ -1,0 +1,35 @@
+[package]
+name = "qpt"
+version = "2.7.0"
+edition = "2021"
+description = "QPT Workbench — Rust port of the qpt-ui Node backend (server + CLI + domain core)"
+
+[lib]
+name = "qpt"
+path = "src/lib.rs"
+
+[[bin]]
+name = "qpt-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "qpt-cli"
+path = "src/bin/qpt-cli.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "time", "sync", "io-util", "fs"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = "0.8"
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

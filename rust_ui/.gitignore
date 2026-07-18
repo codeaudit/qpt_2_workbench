@@ -1,0 +1,4 @@
+target/
+data/server.log*
+data/config.json
+.DS_Store

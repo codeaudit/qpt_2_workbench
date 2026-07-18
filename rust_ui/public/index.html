@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QPT Workbench — Quaternion Process Theory 2.7</title>
+<script>
+/* apply theme before first paint: ?theme= param, else saved choice, else dark */
+(function () {
+  var t = null;
+  try {
+    t = new URLSearchParams(location.search).get("theme") || localStorage.getItem("qpt-theme");
+  } catch (e) {}
+  document.documentElement.dataset.theme = t === "light" ? "light" : "dark";
+})();
+</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="triad"><span class="f">(○)</span><span class="s">[□]</span><span class="t">{△}</span></span>
+    <h1>QPT Workbench</h1>
+    <span class="edition">Consolidated 2.7</span>
+  </div>
+  <span class="tagline">Directed autopoietic navigation — 𝒢 ≡ R ⊓ G admits only trajectories from felt incompleteness to causal encounter.</span>
+  <div class="actions">
+    <button class="btn" id="theme-btn">☀ Light</button>
+    <button class="btn" id="practice-btn">▶ Practice</button>
+    <button class="btn" id="sim-btn">◉ Sim</button>
+    <button class="btn" id="agent-btn">✦ Agent</button>
+    <button class="btn" id="jobs-btn">◷ Jobs <span id="jobs-badge" class="badge hidden"></span>
+    </button>
+    <button class="btn" id="settings-btn">⚙ Settings</button>
+    <button class="btn" id="tour-btn">? Tour</button>
+    <button class="btn" id="ref-btn">⌘ Reference</button>
+    <button class="btn" id="reset-btn">Reset board</button>
+  </div>
+</header>
+
+<nav class="tabs" id="board-tabs"></nav>
+
+<div id="board-context"></div>
+
+<div id="goal-banner" class="hidden">
+  <span class="gb-label">Practice</span>
+  <strong id="gb-title"></strong>
+  <span id="gb-goal"></span>
+  <button class="move-btn" id="gb-hint">hint</button>
+  <button class="move-btn" id="gb-quit">quit</button>
+</div>
+
+<main id="board"></main>
+
+<!-- card detail modal -->
+<div id="modal">
+  <div class="modal-panel">
+    <button class="modal-x" id="modal-close">✕</button>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<!-- spec reference drawer -->
+<aside id="drawer">
+  <div class="drawer-head">
+    <h2>Specification Reference</h2>
+    <input id="drawer-search" type="search" placeholder="filter…">
+    <button class="modal-x" id="drawer-close">✕</button>
+  </div>
+  <div class="d-tabs">
+    <button class="d-tab" data-tab="semantics">Semantics</button>
+    <button class="d-tab" data-tab="skills">Skills</button>
+    <button class="d-tab active" data-tab="gate">Gate &amp; Formulas</button>
+    <button class="d-tab" data-tab="axioms">Axioms &amp; Laws</button>
+    <button class="d-tab" data-tab="signs">Signs &amp; Categories</button>
+    <button class="d-tab" data-tab="agency">Agency</button>
+    <button class="d-tab" data-tab="failure">Failure &amp; Diagnostics</button>
+    <button class="d-tab" data-tab="drill">Drill</button>
+  </div>
+  <div id="drawer-body"></div>
+</aside>
+
+<!-- narrated simulation bar -->
+<div id="sim-bar" class="hidden">
+  <span class="gb-label">Simulation</span>
+  <span id="sim-count"></span>
+  <span id="sim-text"></span>
+  <span class="sim-btns">
+    <button class="move-btn" id="sim-back">Back</button>
+    <button class="move-btn" id="sim-next">Next</button>
+    <button class="move-btn" id="sim-auto">Auto ▶</button>
+    <button class="move-btn" id="sim-exit">Exit</button>
+  </span>
+</div>
+
+<!-- practice exercise list -->
+<div id="learn-modal">
+  <div class="modal-panel">
+    <button class="modal-x" id="learn-close">✕</button>
+    <h2 class="lm-title">Practice — learn by navigation</h2>
+    <p class="lm-sub">Each exercise runs on the live board; the specification's own constraints are the grader.</p>
+    <div id="learn-list"></div>
+  </div>
+</div>
+
+<!-- guided tour overlay -->
+<div id="tour">
+  <div id="tour-highlight"></div>
+  <div id="tour-box">
+    <div id="tour-title"></div>
+    <div id="tour-body"></div>
+    <div id="tour-foot">
+      <span id="tour-count"></span>
+      <span class="tour-btns">
+        <button class="move-btn" id="tour-skip">Skip</button>
+        <button class="move-btn" id="tour-back">Back</button>
+        <button class="move-btn" id="tour-next">Next</button>
+      </span>
+    </div>
+  </div>
+</div>
+
+<!-- agent chat panel -->
+<aside id="agent-panel">
+  <div class="drawer-head">
+    <h2>✦ Kimi Agent</h2>
+    <select id="model-select" class="model-select" title="Model for agent turns" aria-label="Model for agent turns"></select>
+    <button class="modal-x" id="agent-close">✕</button>
+  </div>
+  <div id="agent-log">
+    <div class="agent-msg agent">Ask me to work the board — e.g. “escalate the fossil auth middleware to the resolution procedure”, “walk the haptics card through the gate”, or “create a position about caching”. My actions run through the same rules as your hands (A13, A9, §14, A7).</div>
+  </div>
+  <form id="agent-form">
+    <input id="agent-input" type="text" placeholder="Request a board action…" autocomplete="off">
+    <button class="btn" type="submit">Send</button>
+  </form>
+  <form id="cli-form">
+    <span class="cli-prompt">›</span>
+    <input id="cli-input" type="text" placeholder="CLI: cards · move p1 gate · edit p2 pathology=content · skills …" autocomplete="off" spellcheck="false">
+  </form>
+  <div class="agent-hint">
+    <span>Bridge: @moonshot-ai/kimi-agent-sdk → local kimi CLI. Requires <code>npm start</code> in qpt-ui/.</span>
+    <button class="move-btn" id="skill-shortcut" title="Create and edit the skills the agent reads">＋ skill</button>
+  </div>
+</aside>
+
+<!-- settings page -->
+<div id="settings-page">
+  <div class="settings-frame">
+    <nav class="settings-nav">
+      <h2>⚙ Settings</h2>
+      <button class="s-tab active" data-section="skills">Skills</button>
+      <button class="s-tab" data-section="models">Models</button>
+      <button class="s-tab" data-section="keys">API Keys</button>
+      <button class="s-tab" data-section="prompt">System Prompt</button>
+      <button class="s-tab" data-section="mcp">MCP Servers</button>
+      <button class="s-tab" data-section="functions">Functions</button>
+      <button class="modal-x" id="settings-close">✕</button>
+    </nav>
+    <div id="settings-body"></div>
+  </div>
+</div>
+
+<!-- agentic jobs panel -->
+<aside id="jobs-panel">
+  <div class="drawer-head">
+    <h2>◷ Agent jobs</h2>
+    <button class="modal-x" id="jobs-close">✕</button>
+  </div>
+  <div id="jobs-list"></div>
+  <div class="agent-hint"><span>One worker, FIFO — agent turns and skill generations queue here. Cancel anytime; the queue survives closed panels.</span></div>
+</aside>
+
+<!-- rejection / confirmation notices -->
+<div id="toast"></div>
+
+<script src="qpt-data.js"></script>
+<script src="qpt-core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
